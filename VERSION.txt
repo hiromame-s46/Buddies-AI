@@ -1,0 +1,3 @@
+LFM Web Chat 4.0.0
+Build ID: LFM-WEB-CHAT-FRESH-20260720-400
+Created: 2026-07-20

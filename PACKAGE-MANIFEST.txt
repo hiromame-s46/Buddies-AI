@@ -1,0 +1,20 @@
+LFM Web Chat 4.0.0 package
+
+Deploy these files to public_html/AI/:
+- lfm_setup.php
+- lfm-common.php
+- lfm-api.php
+- chat.html
+- .htaccess
+- .env.example
+
+Development/build helpers:
+- tools/build_portable_linux.sh
+- tools/build_portable_linux_docker.sh
+- .github/workflows/build-portable-llama.yml
+
+Generated at runtime and intentionally NOT included:
+- public_html/AI/.lfm-runtime/.env
+- llama-cli
+- GGUF model
+- logs, cache and rate-limit files

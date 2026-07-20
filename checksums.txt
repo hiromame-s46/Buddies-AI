@@ -1,0 +1,12 @@
+862f4dfeddf6fefae1d11bce37852f45377734b1cd32271db78a64eddd6db272  ./.github/workflows/build-portable-llama.yml
+e06018aed6736374bff679ed3db01e54fe731d905208ae2fb2d097bb10bf3039  ./PACKAGE-MANIFEST.txt
+f296c373d4ce3b65e3e75709088f3cb1b284db2a0dde93f7c83427ff9b1de8ea  ./README.md
+061e52c9fd0d9b1a33fbaf4609cd914eed2431f72d77ba6ae310e067c5babb67  ./VERSION.txt
+5794292daabb4872fb318555b45f25ccffd360a7a6f3e4a72b0e9397a17390be  ./public_html/AI/.env.example
+fb2884d0828c55b41668d0ba1aaaffa6108e800aa967a1f2fce0b449fa2fc51c  ./public_html/AI/.htaccess
+57cb8a0e6da97d37c3308b169ff2f308db45910bac6aba498ea3e9ebbaa129a7  ./public_html/AI/chat.html
+8a6d9a5bbcda463dd20f2c6fe0addb4eb511ced2b6672346176c549599d6bf3f  ./public_html/AI/lfm-api.php
+d7d437e963e47cc437d2ae5795a05700daf74e4a991c05e349d4b302739b8b49  ./public_html/AI/lfm-common.php
+5ae2651fbaf78113b268c82858b1f8bdabac08bf37ffecf81da7319592a67750  ./public_html/AI/lfm_setup.php
+7f5c4860e6af5f16289d907c4b41b45c91c5cc288ae3447450eec54ae478c362  ./tools/build_portable_linux.sh
+be2f0930415f7abf32a385f939433c95688759552c2ea592d65fc5e0d1617290  ./tools/build_portable_linux_docker.sh
