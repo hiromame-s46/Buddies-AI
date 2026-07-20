@@ -27,24 +27,48 @@ concurrency:
 
 jobs:
   build-linux-x64:
-    name: Build Linux x64 binary
+    name: Build llama CLI
     runs-on: ubuntu-latest
-    container: quay.io/pypa/manylinux2014_x86_64
+
+    container:
+      image: quay.io/pypa/manylinux_2_28_x86_64
+
     timeout-minutes: 45
+
+    env:
+      LLAMA_REF: ${{ inputs.llama_ref || 'master' }}
 
     steps:
       - name: Install build tools
+        shell: bash
         run: |
-          yum -y install git zip
+          set -Eeuo pipefail
+
+          dnf -y install \
+            git \
+            zip \
+            file \
+            binutils
+
           /opt/python/cp311-cp311/bin/python \
-            -m pip install --no-cache-dir cmake
+            -m pip install \
+            --no-cache-dir \
+            cmake
+
           echo "/opt/python/cp311-cp311/bin" >> "$GITHUB_PATH"
 
-      - name: Resolve source ref
+          gcc --version
+          g++ --version
+          cmake --version
+          git --version
+
+      - name: Resolve llama.cpp source
         id: source
         shell: bash
         run: |
-          ref="${{ github.event.inputs.llama_ref }}"
+          set -Eeuo pipefail
+
+          ref="${LLAMA_REF:-master}"
 
           if [ -z "$ref" ]; then
             ref="master"
@@ -56,23 +80,40 @@ jobs:
       - name: Clone llama.cpp
         shell: bash
         run: |
-          git clone \
+          set -Eeuo pipefail
+
+          rm -rf llama.cpp
+
+          if git clone \
             --depth=1 \
             --branch "${{ steps.source.outputs.ref }}" \
             https://github.com/ggml-org/llama.cpp.git \
-            llama.cpp \
-          || {
+            llama.cpp
+          then
+            echo "Shallow clone succeeded."
+          else
+            echo "Shallow clone failed. Trying full clone."
+
             rm -rf llama.cpp
+
             git clone \
               https://github.com/ggml-org/llama.cpp.git \
               llama.cpp
+
             git -C llama.cpp checkout \
               "${{ steps.source.outputs.ref }}"
-          }
+          fi
 
-      - name: Configure
+          echo "Source commit:"
+          git -C llama.cpp rev-parse HEAD
+
+      - name: Configure llama.cpp
         shell: bash
         run: |
+          set -Eeuo pipefail
+
+          rm -rf build
+
           cmake \
             -S llama.cpp \
             -B build \
@@ -85,59 +126,159 @@ jobs:
             -DGGML_BLAS=OFF \
             -DGGML_BACKEND_DL=OFF \
             -DGGML_CCACHE=OFF \
+            -DLLAMA_OPENSSL=OFF \
             -DLLAMA_CURL=OFF \
+            -DLLAMA_LLGUIDANCE=OFF \
             -DLLAMA_BUILD_TESTS=OFF \
             -DLLAMA_BUILD_EXAMPLES=OFF \
             -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_WEBUI=OFF \
             -DLLAMA_BUILD_TOOLS=ON
 
-      - name: Build llama-cli
-        shell: bash
-        run: |
-          cmake \
-            --build build \
-            --config Release \
-            --target llama-cli \
-            -j2
-
-      - name: Validate and package
+      - name: Build llama CLI
         shell: bash
         run: |
           set -Eeuo pipefail
 
-          mkdir -p artifact
+          cmake \
+            --build build \
+            --config Release \
+            --target llama-cli \
+            --parallel 2
 
-          cp build/bin/llama-cli artifact/llama-cli
-          chmod 755 artifact/llama-cli
+      - name: Find built binary
+        id: binary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
-          artifact/llama-cli --version
+          binary=""
 
-          ldd artifact/llama-cli \
-            | tee artifact/LDD.txt \
-            || true
+          for candidate in \
+            build/bin/llama-cli \
+            build/bin/Release/llama-cli \
+            build/tools/llama-cli \
+            build/tools/Release/llama-cli
+          do
+            if [ -f "$candidate" ]; then
+              binary="$candidate"
+              break
+            fi
+          done
 
-          if grep -Eiq \
-            "libssl|libcrypto|libcurl|libgomp" \
-            artifact/LDD.txt; then
-            echo "Unexpected shared dependency detected." >&2
-            cat artifact/LDD.txt >&2
+          if [ -z "$binary" ]; then
+            binary="$(find build \
+              -type f \
+              -name 'llama-cli' \
+              -perm -111 \
+              | head -n 1)"
+          fi
+
+          if [ -z "$binary" ] || [ ! -f "$binary" ]; then
+            echo "llama-cli was not found." >&2
+
+            find build \
+              -maxdepth 4 \
+              -type f \
+              | sort
+
             exit 1
           fi
 
+          echo "path=$binary" >> "$GITHUB_OUTPUT"
+          echo "Found: $binary"
+
+      - name: Validate binary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          binary="${{ steps.binary.outputs.path }}"
+
+          chmod 755 "$binary"
+
+          file "$binary"
+
+          "$binary" --version
+
+          mkdir -p artifact
+
+          cp "$binary" artifact/llama-cli
+          chmod 755 artifact/llama-cli
+
           {
+            echo "=== file ==="
+            file artifact/llama-cli
+
+            echo
+            echo "=== ldd ==="
+            ldd artifact/llama-cli || true
+
+            echo
+            echo "=== dynamic dependencies ==="
+            readelf -d artifact/llama-cli \
+              | grep NEEDED \
+              || true
+          } | tee artifact/DEPENDENCIES.txt
+
+          if grep -Eiq \
+            "libssl|libcrypto|libcurl|libgomp" \
+            artifact/DEPENDENCIES.txt
+          then
+            echo "Unexpected shared dependency detected." >&2
+            cat artifact/DEPENDENCIES.txt >&2
+            exit 1
+          fi
+
+      - name: Create build information
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          {
+            echo "Buddies AI portable llama-cli"
+            echo
             echo "Built: $(date -u +%FT%TZ)"
+            echo "Workflow run: ${GITHUB_RUN_ID}"
+            echo "Workflow attempt: ${GITHUB_RUN_ATTEMPT}"
+            echo "Repository: ${GITHUB_REPOSITORY}"
             echo "llama.cpp ref: ${{ steps.source.outputs.ref }}"
             echo "llama.cpp commit: $(git -C llama.cpp rev-parse HEAD)"
-            echo "Target: manylinux2014 x86_64 / glibc 2.17"
+            echo "Build container: manylinux_2_28_x86_64"
+            echo "Minimum target glibc: 2.28"
             echo
+            echo "=== GCC ==="
+            gcc --version
+            echo
+            echo "=== G++ ==="
+            g++ --version
+            echo
+            echo "=== CMake ==="
+            cmake --version
+            echo
+            echo "=== llama-cli ==="
             artifact/llama-cli --version
           } > artifact/BUILD-INFO.txt 2>&1
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
           sha256sum \
             artifact/llama-cli \
             artifact/BUILD-INFO.txt \
-            artifact/LDD.txt \
+            artifact/DEPENDENCIES.txt \
             > artifact/SHA256SUMS.txt
+
+          cat artifact/SHA256SUMS.txt
+
+      - name: Create ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          rm -f llama-portable-linux-x64.zip
 
           cd artifact
 
@@ -145,8 +286,12 @@ jobs:
             ../llama-portable-linux-x64.zip \
             llama-cli \
             BUILD-INFO.txt \
-            LDD.txt \
+            DEPENDENCIES.txt \
             SHA256SUMS.txt
+
+          cd ..
+
+          ls -lh llama-portable-linux-x64.zip
 
       - name: Upload portable build
         uses: actions/upload-artifact@v4
@@ -155,3 +300,4 @@ jobs:
           path: llama-portable-linux-x64.zip
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
