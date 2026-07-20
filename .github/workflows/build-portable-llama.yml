@@ -1,0 +1,157 @@
+name: Build portable llama-cli
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-portable-llama.yml"
+      - "tools/**"
+
+  workflow_dispatch:
+    inputs:
+      llama_ref:
+        description: "llama.cpp branch, tag, or commit"
+        required: false
+        default: "master"
+
+  schedule:
+    - cron: "20 3 1 * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portable-llama-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux-x64:
+    name: Build Linux x64 binary
+    runs-on: ubuntu-latest
+    container: quay.io/pypa/manylinux2014_x86_64
+    timeout-minutes: 45
+
+    steps:
+      - name: Install build tools
+        run: |
+          yum -y install git zip
+          /opt/python/cp311-cp311/bin/python \
+            -m pip install --no-cache-dir cmake
+          echo "/opt/python/cp311-cp311/bin" >> "$GITHUB_PATH"
+
+      - name: Resolve source ref
+        id: source
+        shell: bash
+        run: |
+          ref="${{ github.event.inputs.llama_ref }}"
+
+          if [ -z "$ref" ]; then
+            ref="master"
+          fi
+
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "Building llama.cpp ref: $ref"
+
+      - name: Clone llama.cpp
+        shell: bash
+        run: |
+          git clone \
+            --depth=1 \
+            --branch "${{ steps.source.outputs.ref }}" \
+            https://github.com/ggml-org/llama.cpp.git \
+            llama.cpp \
+          || {
+            rm -rf llama.cpp
+            git clone \
+              https://github.com/ggml-org/llama.cpp.git \
+              llama.cpp
+            git -C llama.cpp checkout \
+              "${{ steps.source.outputs.ref }}"
+          }
+
+      - name: Configure
+        shell: bash
+        run: |
+          cmake \
+            -S llama.cpp \
+            -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++" \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DGGML_STATIC=ON \
+            -DGGML_NATIVE=OFF \
+            -DGGML_OPENMP=OFF \
+            -DGGML_BLAS=OFF \
+            -DGGML_BACKEND_DL=OFF \
+            -DGGML_CCACHE=OFF \
+            -DLLAMA_CURL=OFF \
+            -DLLAMA_BUILD_TESTS=OFF \
+            -DLLAMA_BUILD_EXAMPLES=OFF \
+            -DLLAMA_BUILD_SERVER=OFF \
+            -DLLAMA_BUILD_TOOLS=ON
+
+      - name: Build llama-cli
+        shell: bash
+        run: |
+          cmake \
+            --build build \
+            --config Release \
+            --target llama-cli \
+            -j2
+
+      - name: Validate and package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          mkdir -p artifact
+
+          cp build/bin/llama-cli artifact/llama-cli
+          chmod 755 artifact/llama-cli
+
+          artifact/llama-cli --version
+
+          ldd artifact/llama-cli \
+            | tee artifact/LDD.txt \
+            || true
+
+          if grep -Eiq \
+            "libssl|libcrypto|libcurl|libgomp" \
+            artifact/LDD.txt; then
+            echo "Unexpected shared dependency detected." >&2
+            cat artifact/LDD.txt >&2
+            exit 1
+          fi
+
+          {
+            echo "Built: $(date -u +%FT%TZ)"
+            echo "llama.cpp ref: ${{ steps.source.outputs.ref }}"
+            echo "llama.cpp commit: $(git -C llama.cpp rev-parse HEAD)"
+            echo "Target: manylinux2014 x86_64 / glibc 2.17"
+            echo
+            artifact/llama-cli --version
+          } > artifact/BUILD-INFO.txt 2>&1
+
+          sha256sum \
+            artifact/llama-cli \
+            artifact/BUILD-INFO.txt \
+            artifact/LDD.txt \
+            > artifact/SHA256SUMS.txt
+
+          cd artifact
+
+          zip -9 \
+            ../llama-portable-linux-x64.zip \
+            llama-cli \
+            BUILD-INFO.txt \
+            LDD.txt \
+            SHA256SUMS.txt
+
+      - name: Upload portable build
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama-portable-linux-x64
+          path: llama-portable-linux-x64.zip
+          if-no-files-found: error
+          retention-days: 30
