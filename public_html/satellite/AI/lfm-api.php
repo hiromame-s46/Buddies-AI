@@ -175,7 +175,16 @@ function api_clean_output(string $text, string $prompt = ''): string
     foreach ($lines as $index => $line) {
         if (preg_match('/^\s*>\s*ユーザー\s*[:：]?\s*$/u', $line)) {
             $lines = array_slice($lines, $index + 1);
-            if ($prompt !== '' && isset($lines[0]) && trim($lines[0]) === trim($prompt)) {
+            while (isset($lines[0]) && trim($lines[0]) === '') {
+                array_shift($lines);
+            }
+            if (isset($lines[0]) && preg_match('/^ユーザー\s*[:：]\s*$/u', trim($lines[0]))) {
+                array_shift($lines);
+                while (isset($lines[0]) && trim($lines[0]) === '') {
+                    array_shift($lines);
+                }
+            }
+            if (isset($lines[0])) {
                 array_shift($lines);
             }
             break;
