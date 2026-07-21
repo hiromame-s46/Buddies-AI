@@ -163,14 +163,31 @@ function api_build_prompt(array $input, int $maxChars): array
     return array($system, $prompt);
 }
 
-function api_clean_output(string $text): string
+function api_clean_output(string $text, string $prompt = ''): string
 {
     $text = preg_replace('/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -\/]*[@-~])/', '', $text) ?? $text;
     $text = str_replace("\r", '', $text);
     $lines = explode("\n", $text);
+
+    // Some llama.cpp builds still print the conversation banner and prompt
+    // even with --simple-io/--no-display-prompt. Keep only the generated
+    // response when that interactive marker is present.
+    foreach ($lines as $index => $line) {
+        if (preg_match('/^\s*>\s*ユーザー\s*[:：]?\s*$/u', $line)) {
+            $lines = array_slice($lines, $index + 1);
+            if ($prompt !== '' && isset($lines[0]) && trim($lines[0]) === trim($prompt)) {
+                array_shift($lines);
+            }
+            break;
+        }
+    }
+
     $clean = array();
     foreach ($lines as $line) {
         $trimmed = trim($line);
+        if (preg_match('/^Exiting\.\.\.\s*$/i', $trimmed)) {
+            break;
+        }
         if ($trimmed === '') {
             $clean[] = '';
             continue;
@@ -321,7 +338,7 @@ if (!$result['ok']) {
     ));
 }
 
-$text = api_clean_output((string) $result['stdout']);
+$text = api_clean_output((string) $result['stdout'], $prompt);
 if ($text === '') {
     $details = trim((string) $result['stderr']);
     api_error('empty generation result', 500, array('details' => lfm_substr($details, 0, 1600)));
