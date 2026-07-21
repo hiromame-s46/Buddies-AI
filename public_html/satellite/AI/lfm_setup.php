@@ -2,7 +2,7 @@
 /**
  * LFM Web Chat installer / manager
  * Fresh package 4.0.0 with a new installer architecture.
- * Place in public_html/AI/lfm_setup.php
+ * Place in public_html/satellite/AI/lfm_setup.php
  */
 declare(strict_types=1);
 
