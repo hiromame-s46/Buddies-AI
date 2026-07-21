@@ -184,7 +184,26 @@ function api_clean_output(string $text, string $prompt = ''): string
                     array_shift($lines);
                 }
             }
-            if (isset($lines[0])) {
+            if ($prompt !== '') {
+                $promptLines = explode("\n", str_replace("\r", '', $prompt));
+                while (!empty($promptLines) && trim((string) $promptLines[0]) === '') {
+                    array_shift($promptLines);
+                }
+                $matches = count($promptLines) > 0 && count($lines) >= count($promptLines);
+                if ($matches) {
+                    foreach ($promptLines as $promptIndex => $promptLine) {
+                        if (trim((string) ($lines[$promptIndex] ?? '')) !== trim((string) $promptLine)) {
+                            $matches = false;
+                            break;
+                        }
+                    }
+                }
+                if ($matches) {
+                    $lines = array_slice($lines, count($promptLines));
+                } elseif (isset($lines[0])) {
+                    array_shift($lines);
+                }
+            } elseif (isset($lines[0])) {
                 array_shift($lines);
             }
             break;
