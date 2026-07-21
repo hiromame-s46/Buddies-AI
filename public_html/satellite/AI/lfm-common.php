@@ -427,7 +427,11 @@ function lfm_json_response(array $data, int $status = 200): void
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store, max-age=0');
     header('X-Content-Type-Options: nosniff');
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT);
+    $flags = JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_PRETTY_PRINT;
+    if (defined('JSON_INVALID_UTF8_SUBSTITUTE')) {
+        $flags |= JSON_INVALID_UTF8_SUBSTITUTE;
+    }
+    echo json_encode($data, $flags);
     exit;
 }
 
