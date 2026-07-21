@@ -271,6 +271,10 @@ list($systemPrompt, $prompt) = api_build_prompt($input, $maxPromptChars);
 $maxAllowedTokens = lfm_int($env['LFM_MAX_OUTPUT_TOKENS'] ?? 256, 256, 16, 1024);
 $maxTokens = lfm_int($input['max_tokens'] ?? min(192, $maxAllowedTokens), min(192, $maxAllowedTokens), 16, $maxAllowedTokens);
 $temperature = lfm_float($input['temperature'] ?? 0.2, 0.2, 0.0, 1.5);
+$historyMessages = isset($input['messages']) && is_array($input['messages'])
+    ? array_values($input['messages'])
+    : array();
+$hasHistory = count($historyMessages) > 1;
 $threads = lfm_int($env['LFM_THREADS'] ?? 1, 1, 1, 8);
 $context = lfm_int($env['LFM_CONTEXT'] ?? 2048, 2048, 512, 8192);
 $timeout = lfm_int($env['LFM_TIMEOUT_SECONDS'] ?? 150, 150, 10, 300);
@@ -299,7 +303,7 @@ $argv = array(
     '-m', $model,
     '-f', $promptFile,
     '-sysf', $systemFile,
-    '-cnv',
+    $hasHistory ? '-no-cnv' : '-cnv',
     '-st',
     '-n', (string) $maxTokens,
     '-c', (string) $context,
