@@ -155,8 +155,33 @@ function api_sakurazaka_skill(string $query): array
     if (preg_match('/曲|楽曲|歌|センター|歌詞|作曲|作詞|編曲|MV|シングル|アルバム|リリース/u', $q)) $planned['sakurazaka-music'] = true;
     if (preg_match('/ライブ|公演|セトリ|セットリスト|フォーメーション|ポジション|櫻坂のさ|さくみみ|ブログ|ニュース|予定|出演/u', $q)) $planned['sakurazaka-archive'] = true;
     if (preg_match('/用語|意味|何|とは|ファン|Buddies|欅坂|櫻坂|BACKS|三期生|二期生|一期生/u', $q)) $planned['sakurazaka-dictionary'] = true;
-    $sakurazaka = preg_match('/櫻坂|欅坂|サク|さくみみ|Buddies|メンバー|楽曲|曲|ライブ|フォーメーション|センター|ブログ|MV|卒業|シングル|アルバム|出演|誕生日|身長|出身/u', $q) === 1;
-    if (!$sakurazaka && count($terms) === 0) {
+    $sakurazaka = preg_match('/櫻坂|欅坂|サクラミーツ|さくみみ|Buddies|BACKS|三期生|二期生|一期生/u', $q) === 1;
+    if (!$sakurazaka) {
+        static $memberNames = null;
+        if ($memberNames === null) {
+            $memberNames = array();
+            foreach (array('member.json', 'member_grad.json') as $memberFile) {
+                $memberData = json_decode((string) @file_get_contents($dataDir . '/' . $memberFile), true);
+                if (!is_array($memberData)) continue;
+                foreach ($memberData as $member) {
+                    if (!is_array($member)) continue;
+                    $name = trim((string) ($member['name'] ?? ''));
+                    if ($name !== '') $memberNames[] = $name;
+                }
+            }
+        }
+        foreach ($memberNames as $memberName) {
+            $compactName = preg_replace('/[\s　]+/u', '', $memberName) ?? $memberName;
+            $compactQuery = preg_replace('/[\s　]+/u', '', $q) ?? $q;
+            if ($compactName !== '' && mb_strpos($compactQuery, $compactName, 0, 'UTF-8') !== false) {
+                $sakurazaka = true;
+                break;
+            }
+        }
+    }
+    // Never search the knowledge base for ordinary conversation. A query must
+    // explicitly mention Sakurazaka-related subjects before any files are read.
+    if (!$sakurazaka) {
         return array('skills' => array(), 'context' => '');
     }
 
@@ -246,47 +271,27 @@ function api_clean_output(string $text, string $prompt = ''): string
 {
     $text = preg_replace('/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -\/]*[@-~])/', '', $text) ?? $text;
     $text = str_replace("\r", '', $text);
+
+    // Prefer the exact prompt boundary. llama.cpp may echo startup information
+    // and the complete prompt even when --no-display-prompt is enabled.
+    if ($prompt !== '') {
+        $promptPosition = strrpos($text, $prompt);
+        if ($promptPosition !== false) {
+            $text = substr($text, $promptPosition + strlen($prompt));
+        }
+    }
     $lines = explode("\n", $text);
 
-    // Some llama.cpp builds still print the conversation banner and prompt
-    // even with --simple-io/--no-display-prompt. Keep only the generated
-    // response when that interactive marker is present.
+    // Fallback for builds that alter whitespace while echoing the prompt:
+    // everything before the final interactive prompt marker is diagnostics.
+    $lastMarker = -1;
     foreach ($lines as $index => $line) {
-        if (preg_match('/^\s*>\s*ユーザー\s*[:：]?\s*$/u', $line)) {
-            $lines = array_slice($lines, $index + 1);
-            while (isset($lines[0]) && trim($lines[0]) === '') {
-                array_shift($lines);
-            }
-            if (isset($lines[0]) && preg_match('/^ユーザー\s*[:：]\s*$/u', trim($lines[0]))) {
-                array_shift($lines);
-                while (isset($lines[0]) && trim($lines[0]) === '') {
-                    array_shift($lines);
-                }
-            }
-            if ($prompt !== '') {
-                $promptLines = explode("\n", str_replace("\r", '', $prompt));
-                while (!empty($promptLines) && trim((string) $promptLines[0]) === '') {
-                    array_shift($promptLines);
-                }
-                $matches = count($promptLines) > 0 && count($lines) >= count($promptLines);
-                if ($matches) {
-                    foreach ($promptLines as $promptIndex => $promptLine) {
-                        if (trim((string) ($lines[$promptIndex] ?? '')) !== trim((string) $promptLine)) {
-                            $matches = false;
-                            break;
-                        }
-                    }
-                }
-                if ($matches) {
-                    $lines = array_slice($lines, count($promptLines));
-                } elseif (isset($lines[0])) {
-                    array_shift($lines);
-                }
-            } elseif (isset($lines[0])) {
-                array_shift($lines);
-            }
-            break;
+        if (preg_match('/^\s*>\s*(?:ユーザー\s*[:：]?)?\s*$/u', $line)) {
+            $lastMarker = $index;
         }
+    }
+    if ($lastMarker >= 0) {
+        $lines = array_slice($lines, $lastMarker + 1);
     }
 
     $clean = array();
@@ -299,7 +304,16 @@ function api_clean_output(string $text, string $prompt = ''): string
             $clean[] = '';
             continue;
         }
-        if (preg_match('/^(llama_|ggml_|build:|main:|system_info:|sampling:|sampler |load_|print_info:|common_)/i', $trimmed)) {
+        if (preg_match('/^(Loading model|build\s*:|model\s*:|ftype\s*:|modalities\s*:|using custom system prompt|available commands:|llama_|ggml_|main:|system_info:|sampling:|sampler |load_|print_info:|common_)/i', $trimmed)) {
+            continue;
+        }
+        if (preg_match('/^(\/exit|\/regen|\/clear|\/read|\/glob|[▄▀█ ]{3,})/u', $trimmed)) {
+            continue;
+        }
+        if (preg_match('/^\[\s*Prompt:.*Generation:.*\]\s*$/i', $trimmed)) {
+            continue;
+        }
+        if (preg_match('/^\[[^\]]+\s*\/\s*[^\]]+\.json\]\s*/u', $trimmed)) {
             continue;
         }
         if (preg_match('/^\[.*\]\s*(debug|info|warn|error)\s*:/i', $trimmed)) {
@@ -454,10 +468,6 @@ if ($text === '') {
     $details = trim((string) $result['stderr']);
     api_error('empty generation result', 500, array('details' => lfm_substr($details, 0, 1600)));
 }
-if (!empty($skills)) {
-    $text = '【スキル読み込み: ' . implode('、', $skills) . "】\n\n" . $text;
-}
-
 lfm_json_response(array(
     'ok' => true,
     'text' => $text,
