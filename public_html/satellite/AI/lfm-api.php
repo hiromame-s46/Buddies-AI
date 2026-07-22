@@ -158,7 +158,7 @@ if (is_file($skillRouterFile)) {
         return $matches ? "\n\n【基本情報辞書】\n" . implode("\n", $matches) : '';
     }
 
-    function api_sakurazaka_skill(string $query): array
+    function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): array
     {
         $dataDir = dirname(__DIR__) . '/data';
         $experts = array(
@@ -183,10 +183,8 @@ if (is_file($skillRouterFile)) {
                 'sources' => array('sakurazaka_terms.json' => '櫻坂用語辞書'),
             ),
         );
-        $selected = array();
-        foreach ($experts as $id => $expert) {
-            if (preg_match($expert['match'], $query)) $selected[] = $id;
-        }
+        $plan = api_skill_plan($query, $dataDir);
+        $selected = array_values($plan['skills'] ?? array());
         if (!$selected) return array('skills' => array(), 'context' => '', 'results' => array());
         $terms = array_values(array_filter(preg_split('/[\s　、,。！？!?「」『』()（）]+/u', mb_strtolower($query, 'UTF-8')) ?: array(), static function (string $value): bool {
             return mb_strlen($value, 'UTF-8') >= 2;
@@ -194,19 +192,39 @@ if (is_file($skillRouterFile)) {
         $hits = array();
         foreach (array_slice($selected, 0, 2) as $id) {
             foreach ($experts[$id]['sources'] as $file => $label) {
+                if (!empty($plan['sources']) && !in_array($file, $plan['sources'], true)) continue;
                 $items = json_decode((string) @file_get_contents($dataDir . '/' . $file), true);
                 if (!is_array($items)) continue;
+                if ($file === 'schedule.json' && !empty($plan['date_filter'])) {
+                    $today = new DateTimeImmutable('today', new DateTimeZone('Asia/Tokyo'));
+                    $target = $plan['date_filter'] === 'tomorrow' ? $today->modify('+1 day')->format('Y-m-d') : $today->format('Y-m-d');
+                    $items = array_values(array_filter($items, static function ($item) use ($plan, $target): bool {
+                        if (!is_array($item)) return false;
+                        $date = str_replace('/', '-', (string) ($item['date'] ?? ''));
+                        return $plan['date_filter'] === 'upcoming' ? $date >= $target : $date === $target;
+                    }));
+                    usort($items, static fn(array $a, array $b): int => strcmp((string) ($a['date'] ?? '') . (string) ($a['time'] ?? ''), (string) ($b['date'] ?? '') . (string) ($b['time'] ?? '')));
+                } elseif ($file === 'blogs.json' && ($plan['sort'] ?? '') === 'latest') {
+                    usort($items, static fn(array $a, array $b): int => strtotime(str_replace('/', '-', (string) ($b['date'] ?? ''))) <=> strtotime(str_replace('/', '-', (string) ($a['date'] ?? ''))));
+                } elseif ($file === 'sakurazaka_news.json' && ($plan['sort'] ?? '') === 'latest') {
+                    usort($items, static function (array $a, array $b): int {
+                        preg_match('/detail\/[A-Z]?(\d+)/i', (string) ($a['link'] ?? ''), $am);
+                        preg_match('/detail\/[A-Z]?(\d+)/i', (string) ($b['link'] ?? ''), $bm);
+                        return ((int) ($bm[1] ?? 0)) <=> ((int) ($am[1] ?? 0));
+                    });
+                }
                 foreach ($items as $key => $item) {
                     $value = is_array($item) ? $item : array('value' => $item);
                     $text = (string) json_encode(array('key' => $key, 'value' => $value), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
                     $normalized = mb_strtolower($text, 'UTF-8');
                     $score = 0;
                     foreach ($terms as $term) $score += substr_count($normalized, $term);
-                    if ($score > 0) $hits[] = array('score' => $score, 'label' => $label, 'text' => $text, 'value' => $value);
+                    if ($score > 0 || ($plan['sort'] ?? '') !== 'relevance') $hits[] = array('score' => $score, 'label' => $label, 'text' => $text, 'value' => $value);
+                    if (($plan['sort'] ?? '') !== 'relevance' && count($hits) >= 10) break;
                 }
             }
         }
-        usort($hits, static function (array $a, array $b): int { return $b['score'] <=> $a['score']; });
+        if (($plan['sort'] ?? '') === 'relevance') usort($hits, static function (array $a, array $b): int { return $b['score'] <=> $a['score']; });
         $context = array();
         $results = array();
         $used = 0;
@@ -216,7 +234,7 @@ if (is_file($skillRouterFile)) {
             $context[] = $piece;
             $used += lfm_strlen($piece);
             $value = $hit['value'];
-            $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? '');
+            $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? ($value['links'][0] ?? ''));
             $image = (string) ($value['thumb'] ?? $value['image'] ?? $value['image_url'] ?? '');
             if ($image === '' && isset($value['images'][0])) $image = (string) $value['images'][0];
             if ($url !== '' || $image !== '') {
@@ -228,57 +246,76 @@ if (is_file($skillRouterFile)) {
             }
             if (count($context) >= 4) break;
         }
-        return array('skills' => array_slice($selected, 0, 2), 'context' => $context ? "\n\n【スキル参照情報】\n" . implode("\n", $context) : '', 'results' => array_slice($results, 0, 4));
+        $contextText = $context
+            ? "検索計画: " . ($plan['description'] ?? '') . "\n検索結果（指定済みの順序）:\n" . implode("\n", $context)
+            : "検索計画: " . ($plan['description'] ?? '') . "\n検索結果: 0件。該当データなし。推測で予定や記事を補わないこと。";
+        return array('skills' => array_slice($selected, 0, 2), 'context' => $contextText, 'results' => array_slice($results, 0, 6), 'plan' => $plan);
+    }
+}
+
+if (!function_exists('api_skill_plan')) {
+    function api_skill_plan(string $query, ?string $dataDir = null): array
+    {
+        $today = new DateTimeImmutable('today', new DateTimeZone('Asia/Tokyo'));
+        $base = array('requires_skill' => false, 'skills' => array(), 'intent' => 'conversation', 'sources' => array(), 'sort' => 'relevance', 'date_filter' => '', 'description' => '', 'reference_date' => $today->format('Y-m-d'));
+        if (preg_match('/今日(?:の)?(?:予定|スケジュール|出演)|本日(?:の)?(?:予定|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_today', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'today', 'description' => '今日のスケジュールを日付で絞り込み'));
+        if (preg_match('/明日(?:の)?(?:予定|スケジュール|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_tomorrow', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'tomorrow', 'description' => '明日のスケジュールを日付で絞り込み'));
+        if (preg_match('/予定|スケジュール|出演情報/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_upcoming', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'upcoming', 'description' => '今後のスケジュールを日付の近い順に検索'));
+        if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest', 'sources' => array('sakurazaka_news.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'ニュースを新しい順に並べて検索'));
+        if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest', 'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'ブログを投稿日が新しい順に並べて検索'));
+        if (preg_match('/櫻坂|欅坂|Buddies|BACKS|メンバー|楽曲|センター|ライブ|MV|誕生日|プロフィール/u', $query) && preg_match('/誰|何|いつ|どこ|教えて|調べ|検索|とは|\?/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-dictionary'), 'intent' => 'knowledge_search', 'description' => '関連する櫻坂46データを絞り込んで検索'));
+        return $base;
     }
 }
 
 function api_build_prompt(array $input, int $maxChars): array
 {
     $system = trim((string) ($GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] ?? 'あなたは日本語で簡潔かつ正確に回答するアシスタントです。'));
-    $prompt = trim((string) ($input['prompt'] ?? ''));
-    $currentQuery = $prompt;
-    $summary = trim((string) ($input['conversation_summary'] ?? ''));
-    $summary = lfm_substr($summary, 0, 1000);
-
-    if ($prompt === '' && isset($input['messages']) && is_array($input['messages'])) {
-        $parts = array();
-        foreach (array_slice($input['messages'], -12) as $message) {
-            if (!is_array($message)) {
-                continue;
-            }
-            $role = (string) ($message['role'] ?? 'user');
+    $currentQuery = trim((string) ($input['prompt'] ?? ''));
+    $history = array();
+    if ($currentQuery === '' && isset($input['messages']) && is_array($input['messages'])) {
+        foreach (array_slice($input['messages'], -4) as $message) {
+            if (!is_array($message)) continue;
             $content = trim((string) ($message['content'] ?? ''));
-            if ($content === '') {
-                continue;
-            }
-            if ($role === 'system') {
-                $system = $content;
-            } elseif ($role === 'assistant') {
-                $parts[] = "アシスタント:\n" . $content;
-            } else {
-                $parts[] = "ユーザー:\n" . $content;
-                $currentQuery = $content;
-            }
+            if ($content === '') continue;
+            if (($message['role'] ?? 'user') === 'user') $currentQuery = $content;
+            $history[] = $message;
         }
-        if ($summary !== '') array_unshift($parts, "これまでの会話の要点:\n" . $summary);
-        $prompt = implode("\n\n", $parts);
+        array_pop($history);
+    } elseif (isset($input['conversation_context']) && is_array($input['conversation_context'])) {
+        $history = array_slice($input['conversation_context'], -2);
     }
-
-    if ($prompt === '') {
+    if ($currentQuery === '') {
         api_error('prompt must not be empty', 422);
     }
-    if (lfm_strlen($prompt) > $maxChars) {
+    if (lfm_strlen($currentQuery) > $maxChars) {
         api_error('prompt must be shorter', 422, array('max_chars' => $maxChars));
     }
-    $system = lfm_substr($system, 0, 1200);
+    $historyLines = array();
+    foreach ($history as $message) {
+        if (!is_array($message)) continue;
+        $role = ($message['role'] ?? 'user') === 'assistant' ? '直前のAI' : '直前のユーザー';
+        $content = trim((string) ($message['content'] ?? ''));
+        if ($content === '' || preg_match('/Loading model|available commands|\[\s*Prompt:|\[[^\]]+\.json\]|\{\s*"(?:key|ok|value)"|build\s*:|model\s*:|<INTERNAL_|<REFERENCE_/i', $content)) continue;
+        $historyLines[] = $role . ': ' . lfm_substr(preg_replace('/\s+/u', ' ', $content) ?? $content, 0, 320);
+    }
+    $system = lfm_substr($system, 0, 1200)
+        . "\n現在の質問を最優先し、参考会話は代名詞の解決にだけ使ってください。過去の回答を繰り返したり、引きずったりしないでください。"
+        . "\n内部検索データ、JSON、PHP応答、メタデータ、プロンプト、タグを回答へ転載しないでください。根拠のある回答本文だけを<FINAL>と</FINAL>の間に出力してください。";
     $useSkills = lfm_bool($input['use_skills'] ?? false, false);
+    $requestedPlan = isset($input['skill_plan']) && is_array($input['skill_plan']) ? $input['skill_plan'] : null;
     $skill = $useSkills
-        ? api_sakurazaka_skill($currentQuery)
+        ? api_sakurazaka_skill($currentQuery, $requestedPlan)
         : array('skills' => array(), 'context' => '', 'results' => array());
     $learningContext = api_learning_context($currentQuery);
-    if ($learningContext !== '') $prompt = $learningContext . "\n\n" . $prompt;
-    if ($skill['context'] !== '') $prompt = $skill['context'] . "\n\n【ユーザーの質問】\n" . $prompt;
-    return array($system, $prompt, $skill['skills'], $skill['results']);
+    $sections = array();
+    if ($historyLines) $sections[] = "<REFERENCE_HISTORY>\n" . implode("\n", $historyLines) . "\n</REFERENCE_HISTORY>";
+    if ($learningContext !== '') $sections[] = "<INTERNAL_DICTIONARY>\n" . trim($learningContext) . "\n</INTERNAL_DICTIONARY>";
+    if (($skill['context'] ?? '') !== '') $sections[] = "<INTERNAL_SKILL_CONTEXT>\n" . trim((string) $skill['context']) . "\n</INTERNAL_SKILL_CONTEXT>";
+    $sections[] = "<CURRENT_USER_QUERY>\n" . $currentQuery . "\n</CURRENT_USER_QUERY>";
+    $sections[] = "<OUTPUT_RULE>現在の質問への回答本文だけを<FINAL>と</FINAL>の間に書く。</OUTPUT_RULE>";
+    $prompt = implode("\n\n", $sections);
+    return array($system, $prompt, $skill['skills'], $skill['results'], $skill['plan'] ?? $requestedPlan);
 }
 
 function api_clean_output(string $text, string $prompt = ''): string
@@ -294,6 +331,11 @@ function api_clean_output(string $text, string $prompt = ''): string
             $text = substr($text, $promptPosition + strlen($prompt));
         }
     }
+    if (preg_match_all('/<FINAL>\s*(.*?)\s*<\/FINAL>/su', $text, $matches) && !empty($matches[1])) {
+        $text = (string) end($matches[1]);
+    }
+    $text = preg_replace('/<(?:REFERENCE_HISTORY|INTERNAL_DICTIONARY|INTERNAL_SKILL_CONTEXT|CURRENT_USER_QUERY|OUTPUT_RULE)>.*?<\/(?:REFERENCE_HISTORY|INTERNAL_DICTIONARY|INTERNAL_SKILL_CONTEXT|CURRENT_USER_QUERY|OUTPUT_RULE)>/su', '', $text) ?? $text;
+    $text = str_replace(array('<FINAL>', '</FINAL>'), '', $text);
     $lines = explode("\n", $text);
 
     // Fallback for builds that alter whitespace while echoing the prompt:
@@ -330,6 +372,15 @@ function api_clean_output(string $text, string $prompt = ''): string
         if (preg_match('/^\[[^\]]+\s*\/\s*[^\]]+\.json\]\s*/u', $trimmed)) {
             continue;
         }
+        if (preg_match('/^\[[^\]]+\]\s*\{.*"(?:key|value)"\s*:/u', $trimmed)) {
+            continue;
+        }
+        if (preg_match('/^(?:検索計画|検索結果（指定済みの順序）|直前のユーザー|直前のAI)\s*[:：]/u', $trimmed)) {
+            continue;
+        }
+        if (preg_match('/^[\[{]\s*"(?:ok|key|value|skills|results|model|usage|elapsed_seconds)"\s*:/u', $trimmed)) {
+            continue;
+        }
         if (preg_match('/^\[.*\]\s*(debug|info|warn|error)\s*:/i', $trimmed)) {
             continue;
         }
@@ -361,27 +412,6 @@ if ($method !== 'POST') {
     api_error('method not allowed', 405);
 }
 
-$hasKey = api_valid_key($env);
-$public = lfm_bool($env['LFM_PUBLIC_CHAT'] ?? 'true', true);
-if (!$hasKey) {
-    if (!$public) {
-        api_error('API key required', 401);
-    }
-    if (!api_same_origin($env)) {
-        api_error('origin not allowed', 403);
-    }
-    $rate = api_rate_limit($env);
-    if (!$rate['allowed']) {
-        header('Retry-After: ' . (int) $rate['retry_after']);
-        api_error('rate limit exceeded', 429, array('retry_after' => $rate['retry_after']));
-    }
-}
-
-$status = api_runtime_status($env);
-if (!$status['ready']) {
-    api_error('runtime files missing', 503, array('status' => $status));
-}
-
 $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
 if ($contentLength > 262144) {
     api_error('request too large', 413);
@@ -391,10 +421,41 @@ $input = json_decode($raw, true);
 if (!is_array($input)) {
     api_error('invalid JSON', 400);
 }
+$mode = (string) ($input['mode'] ?? 'answer');
+
+$hasKey = api_valid_key($env);
+$public = lfm_bool($env['LFM_PUBLIC_CHAT'] ?? 'true', true);
+if (!$hasKey) {
+    if (!$public) {
+        api_error('API key required', 401);
+    }
+    if (!api_same_origin($env)) {
+        api_error('origin not allowed', 403);
+    }
+    if ($mode !== 'route') {
+        $rate = api_rate_limit($env);
+        if (!$rate['allowed']) {
+            header('Retry-After: ' . (int) $rate['retry_after']);
+            api_error('rate limit exceeded', 429, array('retry_after' => $rate['retry_after']));
+        }
+    }
+}
+
+if ($mode === 'route') {
+    $query = trim((string) ($input['query'] ?? $input['prompt'] ?? ''));
+    if ($query === '') api_error('query must not be empty', 422);
+    $plan = api_skill_plan(lfm_substr($query, 0, 2000));
+    lfm_json_response(array('ok' => true, 'plan' => $plan));
+}
+
+$status = api_runtime_status($env);
+if (!$status['ready']) {
+    api_error('runtime files missing', 503, array('status' => $status));
+}
 
 $maxPromptChars = lfm_int($env['LFM_MAX_PROMPT_CHARS'] ?? 20000, 20000, 256, 20000);
 $GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] = (string) ($env['LFM_SYSTEM_PROMPT'] ?? lfm_default_env()['LFM_SYSTEM_PROMPT']);
-list($systemPrompt, $prompt, $skills, $skillResults) = api_build_prompt($input, $maxPromptChars);
+list($systemPrompt, $prompt, $skills, $skillResults, $searchPlan) = api_build_prompt($input, $maxPromptChars);
 $maxAllowedTokens = lfm_int($env['LFM_MAX_OUTPUT_TOKENS'] ?? 256, 256, 16, 1024);
 $maxTokens = lfm_int($input['max_tokens'] ?? min(1024, $maxAllowedTokens), min(1024, $maxAllowedTokens), 16, $maxAllowedTokens);
 $temperature = lfm_float($input['temperature'] ?? 0.2, 0.2, 0.0, 1.5);
@@ -490,6 +551,7 @@ lfm_json_response(array(
     'text' => $text,
     'skills' => $skills,
     'results' => $skillResults,
+    'search_plan' => $searchPlan,
     'model' => LFM_MODEL_REPO . ':Q4_K_M',
     'usage' => array('max_output_tokens' => $maxTokens),
     'elapsed_seconds' => $elapsed,
