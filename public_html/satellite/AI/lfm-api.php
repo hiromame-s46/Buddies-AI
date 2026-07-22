@@ -127,7 +127,110 @@ function api_runtime_status(array $env): array
 }
 
 
-require_once __DIR__ . '/lfm-skill-router.php';
+$skillRouterFile = __DIR__ . '/lfm-skill-router.php';
+if (is_file($skillRouterFile)) {
+    require_once $skillRouterFile;
+} else {
+    // Keep the chat API available even when a deployment misses a newly added
+    // companion file. The sparse router is preferred; this bounded fallback
+    // searches only the expert sources selected from the current question.
+    function api_learning_context(string $query): string
+    {
+        $entries = lfm_read_json(LFM_LEARNING_FILE);
+        if (!$entries) return '';
+        $normalized = mb_strtolower($query, 'UTF-8');
+        $matches = array();
+        foreach ($entries as $entry) {
+            if (!is_array($entry)) continue;
+            $term = trim((string) ($entry['term'] ?? ''));
+            $definition = trim((string) ($entry['definition'] ?? ''));
+            if ($term === '' || $definition === '') continue;
+            $aliases = is_array($entry['aliases'] ?? null) ? $entry['aliases'] : array();
+            foreach (array_merge(array($term), $aliases) as $needle) {
+                $needle = trim((string) $needle);
+                if ($needle !== '' && mb_strpos($normalized, mb_strtolower($needle, 'UTF-8'), 0, 'UTF-8') !== false) {
+                    $matches[] = $term . ': ' . lfm_substr($definition, 0, 320);
+                    break;
+                }
+            }
+            if (count($matches) >= 3) break;
+        }
+        return $matches ? "\n\n【基本情報辞書】\n" . implode("\n", $matches) : '';
+    }
+
+    function api_sakurazaka_skill(string $query): array
+    {
+        $dataDir = dirname(__DIR__) . '/data';
+        $experts = array(
+            'sakurazaka-members' => array(
+                'match' => '/メンバー|加入|卒業|現役|誕生日|身長|出身|プロフィール|誰/u',
+                'sources' => array('member.json' => 'メンバー', 'member_grad.json' => '卒業メンバー'),
+            ),
+            'sakurazaka-music' => array(
+                'match' => '/曲|楽曲|歌|センター|歌詞|作曲|作詞|編曲|MV|シングル|アルバム|リリース|ペンライト|サイリウム/u',
+                'sources' => array('sakamichi_sakura_songs.json' => '楽曲', 'sakurazaka46_songs.json' => '楽曲', 'sakamichi_sakura_mvs.json' => 'MV', 'cyalume.json' => 'ペンライトカラー'),
+            ),
+            'sakurazaka-live' => array(
+                'match' => '/ライブ|公演|セトリ|セットリスト|フォーメーション|ポジション|ツアー|会場/u',
+                'sources' => array('sakamichi_sakura_lives.json' => 'ライブ', 'sakamichi_sakura_setlists.json' => 'セットリスト', 'sakamichi_sakura_formations.json' => 'フォーメーション'),
+            ),
+            'sakurazaka-media' => array(
+                'match' => '/櫻坂のさ|さくみみ|ブログ|ニュース|予定|出演|スケジュール|最新|今日|明日/u',
+                'sources' => array('sakurazaka46_no_sa.json' => '櫻坂のさ', 'sakumimi_data.json' => 'さくみみ', 'blogs.json' => 'ブログ', 'sakurazaka_news.json' => 'ニュース', 'schedule.json' => 'スケジュール'),
+            ),
+            'sakurazaka-dictionary' => array(
+                'match' => '/用語|意味|とは|ファン|Buddies|欅坂|櫻坂|BACKS|三期生|二期生|一期生/u',
+                'sources' => array('sakurazaka_terms.json' => '櫻坂用語辞書'),
+            ),
+        );
+        $selected = array();
+        foreach ($experts as $id => $expert) {
+            if (preg_match($expert['match'], $query)) $selected[] = $id;
+        }
+        if (!$selected) return array('skills' => array(), 'context' => '', 'results' => array());
+        $terms = array_values(array_filter(preg_split('/[\s　、,。！？!?「」『』()（）]+/u', mb_strtolower($query, 'UTF-8')) ?: array(), static function (string $value): bool {
+            return mb_strlen($value, 'UTF-8') >= 2;
+        }));
+        $hits = array();
+        foreach (array_slice($selected, 0, 2) as $id) {
+            foreach ($experts[$id]['sources'] as $file => $label) {
+                $items = json_decode((string) @file_get_contents($dataDir . '/' . $file), true);
+                if (!is_array($items)) continue;
+                foreach ($items as $key => $item) {
+                    $value = is_array($item) ? $item : array('value' => $item);
+                    $text = (string) json_encode(array('key' => $key, 'value' => $value), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+                    $normalized = mb_strtolower($text, 'UTF-8');
+                    $score = 0;
+                    foreach ($terms as $term) $score += substr_count($normalized, $term);
+                    if ($score > 0) $hits[] = array('score' => $score, 'label' => $label, 'text' => $text, 'value' => $value);
+                }
+            }
+        }
+        usort($hits, static function (array $a, array $b): int { return $b['score'] <=> $a['score']; });
+        $context = array();
+        $results = array();
+        $used = 0;
+        foreach ($hits as $hit) {
+            $piece = '[' . $hit['label'] . '] ' . lfm_substr($hit['text'], 0, 700);
+            if ($used + lfm_strlen($piece) > 2400) continue;
+            $context[] = $piece;
+            $used += lfm_strlen($piece);
+            $value = $hit['value'];
+            $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? '');
+            $image = (string) ($value['thumb'] ?? $value['image'] ?? $value['image_url'] ?? '');
+            if ($image === '' && isset($value['images'][0])) $image = (string) $value['images'][0];
+            if ($url !== '' || $image !== '') {
+                $results[] = array(
+                    'type' => $hit['label'], 'title' => (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? $hit['label']),
+                    'url' => $url, 'image' => $image, 'author' => (string) ($value['member'] ?? $value['author'] ?? ''),
+                    'date' => (string) ($value['date'] ?? $value['published_at'] ?? ''),
+                );
+            }
+            if (count($context) >= 4) break;
+        }
+        return array('skills' => array_slice($selected, 0, 2), 'context' => $context ? "\n\n【スキル参照情報】\n" . implode("\n", $context) : '', 'results' => array_slice($results, 0, 4));
+    }
+}
 
 function api_build_prompt(array $input, int $maxChars): array
 {
