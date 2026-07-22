@@ -1,0 +1,71 @@
+'use strict';
+
+const $=id=>document.getElementById(id);
+const STORE={settings:'buddies-ai-settings-v5',history:'buddies-ai-history-v5'};
+const defaults={includeHistory:true,saveHistory:true,maxTokens:1024,temperature:.2};
+const SEND_ICON='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="m5 12 14-7-4 14-3-6-7-1Z"/><path d="m12 13 7-8"/></svg>';
+const STOP_ICON='<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5"/></svg>';
+let settings={...defaults},messages=[],controller=null,generating=false;
+
+function parse(value,fallback){try{return JSON.parse(value)}catch{return fallback}}
+function load(){settings={...defaults,...parse(localStorage.getItem(STORE.settings),{})};if(settings.saveHistory){messages=parse(localStorage.getItem(STORE.history),[]).filter(m=>m&&['user','assistant'].includes(m.role)&&typeof m.text==='string').slice(-24)}}
+function persist(){localStorage.setItem(STORE.settings,JSON.stringify(settings));if(settings.saveHistory)localStorage.setItem(STORE.history,JSON.stringify(messages.slice(-24)));else localStorage.removeItem(STORE.history)}
+function toast(text){const el=$('toast');el.textContent=text;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),1800)}
+function time(timestamp){return new Intl.DateTimeFormat('ja-JP',{hour:'2-digit',minute:'2-digit'}).format(new Date(timestamp))}
+function scroll(smooth=true){requestAnimationFrame(()=>$('messages').scrollTo({top:$('messages').scrollHeight,behavior:smooth?'smooth':'auto'}))}
+
+function append(message,runtime=false){
+  const row=document.createElement('article');row.className=`message ${message.role}`;
+  const avatar=document.createElement('div');avatar.className='avatar';
+  if(message.role==='assistant'){const img=document.createElement('img');img.src='assistant-avatar.png';img.alt='Buddies AI';avatar.append(img)}else avatar.textContent='YOU';
+  const wrap=document.createElement('div');wrap.className='bubble-wrap';
+  const bubble=document.createElement('div');bubble.className='bubble';bubble.textContent=message.text||'';
+  const meta=document.createElement('div');meta.className='meta';meta.append(document.createTextNode(time(message.time||Date.now())));
+  if(!runtime){const copy=document.createElement('button');copy.className='copy';copy.type='button';copy.textContent='コピー';copy.onclick=async()=>{try{await navigator.clipboard.writeText(message.text);toast('コピーしました')}catch{toast('コピーできませんでした')}};meta.append(copy)}
+  wrap.append(bubble,meta);row.append(avatar,wrap);$('messages').append(row);return{row,bubble};
+}
+function render(){$('messages').querySelectorAll('.message').forEach(el=>el.remove());$('empty').hidden=messages.length>0;messages.forEach(m=>append(m));scroll(false)}
+function add(role,text){const message={role,text:cleanAnswer(text),time:Date.now()};messages.push(message);messages=messages.slice(-24);persist();$('empty').hidden=true;append(message);scroll();return message}
+
+function cleanAnswer(text){let value=String(text||'');const marker=value.lastIndexOf('\n>\n');if(marker>=0)value=value.slice(marker+3);return value.replace(/【[^】]*(?:スキル|skill|メタ|metadata)[^】]*】/giu,'').replace(/^\s*(?:Loading model|build|model|ftype|modalities|using custom system prompt|available commands|スキル読み込み|skill(?: loaded)?|metadata|使用モデル|elapsed_seconds|usage|backend)\s*[:：]?.*$/gimu,'').replace(/^\s*\[\s*Prompt:.*Generation:.*\]\s*$/gim,'').replace(/^\s*[▄▀█ ]{3,}\s*$/gmu,'').replace(/\n{3,}/g,'\n\n').trim()}
+function compactMemory(history){return history.slice(-8,-4).map(m=>`${m.role==='user'?'ユーザー':'AI'}: ${m.text.replace(/\s+/g,' ').slice(0,140)}`).join('\n').slice(0,900)}
+function payload(current,useSkills){const previous=messages.slice(0,-1),recent=settings.includeHistory?previous.slice(-4):[];return{messages:[...recent.map(m=>({role:m.role,content:m.text})),{role:'user',content:current}],conversation_summary:settings.includeHistory?compactMemory(previous):'',use_skills:!!useSkills,max_tokens:settings.maxTokens,temperature:settings.temperature}}
+
+function resize(){const input=$('input');input.style.height='auto';input.style.height=Math.min(150,input.scrollHeight)+'px';$('sendButton').disabled=generating?false:!input.value.trim()}
+function setSendMode(stopping){const button=$('sendButton');button.type=stopping?'button':'submit';button.innerHTML=stopping?STOP_ICON:SEND_ICON;button.disabled=false;button.setAttribute('aria-label',stopping?'回答を停止':'送信');button.onclick=stopping?()=>controller?.abort():null}
+function loadingBubble(label){const loading=append({role:'assistant',text:'',time:Date.now()},true);loading.bubble.innerHTML='<span class="typing"><i></i><i></i><i></i></span><span class="loading-label"></span>';loading.bubble.querySelector('.loading-label').textContent=label;scroll();return loading}
+function errorMessage(code,data){const error=String(data?.error||data?.message||'');if(code===429&&error.includes('busy'))return '現在ほかの回答を生成中です。少し後でもう一度送信してください。';if(code===429)return '利用回数の上限に達しました。時間を空けて再度お試しください。';if(code===503)return '回答モデルを利用できません。';if(code===504)return '生成がタイムアウトしました。';return error?`APIエラー: ${error}`:`通信エラー（HTTP ${code}）`}
+
+function safeUrl(value){try{const url=new URL(String(value||''),location.href);return ['http:','https:'].includes(url.protocol)?url.href:''}catch{return''}}
+function renderSearchResults(items){if(!Array.isArray(items)||!items.length)return;const bubbles=$('messages').querySelectorAll('.message.assistant .bubble'),bubble=bubbles[bubbles.length-1];if(!bubble)return;const list=document.createElement('div');list.className='search-results';items.forEach(item=>{const url=safeUrl(item.url),card=document.createElement(url?'a':'div');card.className='result-card';if(url){card.href=url;card.target='_blank';card.rel='noopener noreferrer'}const image=safeUrl(item.image);if(image){const img=document.createElement('img');img.src=image;img.alt='';img.loading='lazy';card.append(img)}const body=document.createElement('span');body.className='result-card-body';const source=document.createElement('span');source.className='result-card-source';source.textContent=item.type||'検索結果';const title=document.createElement('strong');title.textContent=item.title||'検索結果';const meta=document.createElement('span');meta.className='result-card-meta';meta.textContent=[item.author,item.date].filter(Boolean).join(' / ');body.append(source,title);if(meta.textContent)body.append(meta);card.append(body);list.append(card)});bubble.append(list);scroll()}
+
+async function send(text,useSkills=false,alreadyAdded=false){
+  if(generating||!String(text).trim())return;text=String(text).trim();if(!alreadyAdded)add('user',text);$('input').value='';resize();generating=true;controller=new AbortController();setSendMode(true);
+  const loading=loadingBubble(useSkills?'検索結果を確認しながら回答を生成中…':'回答を生成中…');
+  try{const response=await fetch('lfm-api.php',{method:'POST',cache:'no-store',signal:controller.signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(payload(text,useSkills))});const raw=await response.text();let data;try{data=JSON.parse(raw)}catch{throw new Error(`不正なAPI応答: ${raw.slice(0,120)}`)}if(!response.ok||!data.ok)throw new Error(errorMessage(response.status,data));loading.row.remove();add('assistant',data.text);renderSearchResults(data.results)}catch(error){loading.row.remove();if(error.name==='AbortError')toast('生成を中止しました');else add('assistant',error.message)}finally{generating=false;controller=null;setSendMode(false);resize();$('input').focus()}
+}
+
+function shouldOfferSkill(text){return /櫻坂|欅坂|サクラミーツ|さくみみ|Buddies|BACKS|三期生|二期生|一期生|メンバー|楽曲|センター|ライブ|ブログ|MV/.test(text)&&/最新|ニュース|検索|調べ|ブログ|記事|予定|楽曲|メンバー|比較|根拠|出典|プロフィール|誰|いつ|どこ|誕生日|身長|出身|リリース|セットリスト/.test(text)}
+function requestSkillChoice(text){add('user',text);$('input').value='';resize();const choice=append({role:'assistant',text:'',time:Date.now()},true);choice.bubble.classList.add('skill-choice');const message=document.createElement('p');message.textContent='関連データを検索して回答できます。スキルを使いますか？';const actions=document.createElement('div');actions.className='skill-choice-actions';const use=document.createElement('button');use.type='button';use.className='skill-use';use.textContent='スキルを使う';const plain=document.createElement('button');plain.type='button';plain.className='skill-skip';plain.textContent='使わずに回答';use.onclick=()=>{choice.row.remove();send(text,true,true)};plain.onclick=()=>{choice.row.remove();send(text,false,true)};actions.append(use,plain);choice.bubble.append(message,actions);scroll()}
+function routeText(text){const value=String(text||'').trim();if(!value)return;if(shouldOfferSkill(value))requestSkillChoice(value);else send(value)}
+
+function loadScript(src){return new Promise((resolve,reject)=>{const script=document.createElement('script');script.src=src;script.async=true;script.onload=resolve;script.onerror=()=>reject(new Error('load failed'));document.head.append(script)})}
+async function loadFirstScript(urls,test){let last;for(const url of urls){try{await loadScript(url);if(test())return}catch(error){last=error}}throw last||new Error('ASTRAの認識ライブラリを読み込めませんでした')}
+async function fetchFirstJson(urls){let last;for(const url of urls){try{const response=await fetch(url,{cache:'no-store'});if(!response.ok)throw new Error(`HTTP ${response.status}`);return await response.json()}catch(error){last=error}}throw last||new Error('ASTRAの学習データを読み込めませんでした')}
+const astra={ready:null,index:null};
+async function loadAstra(){if(astra.ready)return astra.ready;astra.ready=(async()=>{if(!window.faceapi)await loadFirstScript(['https://cdn.jsdelivr.net/npm/@vladmandic/face-api/dist/face-api.js','https://unpkg.com/@vladmandic/face-api/dist/face-api.js'],()=>!!window.faceapi);if(!window.AstraFaceIndex)await loadFirstScript(['../ASTRA/matcher.js','/satellite/ASTRA/matcher.js'],()=>!!window.AstraFaceIndex);const modelUrl='https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model';await Promise.all([faceapi.nets.ssdMobilenetv1.loadFromUri(modelUrl),faceapi.nets.faceLandmark68Net.loadFromUri(modelUrl),faceapi.nets.faceRecognitionNet.loadFromUri(modelUrl)]);const data=await fetchFirstJson(['../ASTRA/api.php?action=descriptors&model=playground','/satellite/ASTRA/api.php?action=descriptors&model=playground']);astra.index=AstraFaceIndex.build(data,{maxPrototypes:32,refineTopMembers:12,topK:5});if(!astra.index.ready)throw new Error('ASTRAの学習データがありません')})().catch(error=>{astra.ready=null;throw error});return astra.ready}
+async function identifyImage(file){const url=URL.createObjectURL(file);try{await loadAstra();const image=new Image();image.src=url;await new Promise((resolve,reject)=>{image.onload=resolve;image.onerror=reject});const detections=await faceapi.detectAllFaces(image,new faceapi.SsdMobilenetv1Options({minConfidence:.45})).withFaceLandmarks().withFaceDescriptors();if(!detections.length)return '顔を検出できませんでした。';const rows=detections.map((d,index)=>{const candidates=AstraFaceIndex.candidates(astra.index,d.descriptor,{refineTopMembers:12,topK:5}),best=candidates[0],second=candidates[1],known=best&&best.distance<=.58&&(!second||second.distance-best.distance>=.015);return `顔${index+1}: ${known?best.name+'（候補）':'判定保留'}`});return `ASTRAで${detections.length}人の顔を判定しました。\n\n${rows.join('\n')}` }finally{URL.revokeObjectURL(url)}}
+function showImagePreview(file){const reader=new FileReader();reader.onload=()=>{const bubbles=$('messages').querySelectorAll('.message.user .bubble'),bubble=bubbles[bubbles.length-1];if(!bubble)return;const img=document.createElement('img');img.className='message-image';img.src=String(reader.result);img.alt=file.name||'送信画像';bubble.prepend(img);scroll(false)};reader.readAsDataURL(file)}
+async function handleImage(file){if(!file)return;add('user',file.name||'画像');showImagePreview(file);const loading=loadingBubble('ASTRAモデルを読み込み中…');try{const answer=await identifyImage(file);loading.row.remove();add('assistant',answer)}catch(error){loading.row.remove();add('assistant',`ASTRA画像判定エラー: ${error.message}`)}}
+
+function openSettings(){$('includeHistory').checked=settings.includeHistory;$('saveHistory').checked=settings.saveHistory;$('settingsBackdrop').classList.add('open')}
+function closeSettings(){$('settingsBackdrop').classList.remove('open')}
+$('composer').onsubmit=event=>{event.preventDefault();routeText($('input').value)};
+$('input').oninput=resize;$('input').onkeydown=event=>{if(event.key==='Enter'&&!event.shiftKey&&!event.isComposing&&!matchMedia('(max-width:620px)').matches){event.preventDefault();$('composer').requestSubmit()}};
+$('imageButton').onclick=()=>!generating&&$('imageInput').click();$('imageInput').onchange=event=>{const file=event.target.files?.[0];event.target.value='';handleImage(file)};
+$('settingsButton').onclick=openSettings;$('closeSettings').onclick=closeSettings;$('settingsBackdrop').onclick=event=>{if(event.target===$('settingsBackdrop'))closeSettings()};
+$('saveSettings').onclick=()=>{settings={...settings,includeHistory:$('includeHistory').checked,saveHistory:$('saveHistory').checked};persist();closeSettings();toast('設定を保存しました')};
+$('resetSettings').onclick=()=>{settings={...defaults};persist();openSettings();toast('設定を初期化しました')};
+$('clearButton').onclick=()=>{if(!messages.length||confirm('この端末の会話履歴を削除しますか？')){messages=[];persist();render();toast('会話を削除しました')}};
+document.querySelectorAll('.starter').forEach(button=>button.onclick=()=>{$('input').value=button.dataset.text||'';resize();$('input').focus()});
+load();render();setSendMode(false);resize();$('input').focus();

@@ -130,6 +130,30 @@ function api_runtime_status(array $env): array
  * AI skills for the SakuLabo knowledge base. Keep this allow-list explicit:
  * account/auth/admin data must never become prompt context.
  */
+function api_learning_context(string $query): string
+{
+    $entries = lfm_read_json(LFM_LEARNING_FILE);
+    if (!$entries) return '';
+    $normalized = mb_strtolower($query, 'UTF-8');
+    $matches = array();
+    foreach ($entries as $entry) {
+        if (!is_array($entry)) continue;
+        $term = trim((string) ($entry['term'] ?? ''));
+        $definition = trim((string) ($entry['definition'] ?? ''));
+        if ($term === '' || $definition === '') continue;
+        $needles = array_merge(array($term), is_array($entry['aliases'] ?? null) ? $entry['aliases'] : array());
+        foreach ($needles as $needle) {
+            $needle = trim((string) $needle);
+            if ($needle !== '' && mb_strpos($normalized, mb_strtolower($needle, 'UTF-8'), 0, 'UTF-8') !== false) {
+                $matches[] = $term . ': ' . lfm_substr($definition, 0, 320);
+                break;
+            }
+        }
+        if (count($matches) >= 3) break;
+    }
+    return $matches ? "\n\n【基本情報辞書】\n" . implode("\n", $matches) : '';
+}
+
 function api_sakurazaka_skill(string $query): array
 {
     $dataDir = dirname(__DIR__) . '/data';
@@ -247,6 +271,9 @@ function api_build_prompt(array $input, int $maxChars): array
 {
     $system = trim((string) ($GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] ?? 'あなたは日本語で簡潔かつ正確に回答するアシスタントです。'));
     $prompt = trim((string) ($input['prompt'] ?? ''));
+    $currentQuery = $prompt;
+    $summary = trim((string) ($input['conversation_summary'] ?? ''));
+    $summary = lfm_substr($summary, 0, 1000);
 
     if ($prompt === '' && isset($input['messages']) && is_array($input['messages'])) {
         $parts = array();
@@ -265,8 +292,10 @@ function api_build_prompt(array $input, int $maxChars): array
                 $parts[] = "アシスタント:\n" . $content;
             } else {
                 $parts[] = "ユーザー:\n" . $content;
+                $currentQuery = $content;
             }
         }
+        if ($summary !== '') array_unshift($parts, "これまでの会話の要点:\n" . $summary);
         $prompt = implode("\n\n", $parts);
     }
 
@@ -279,8 +308,10 @@ function api_build_prompt(array $input, int $maxChars): array
     $system = lfm_substr($system, 0, 1200);
     $useSkills = lfm_bool($input['use_skills'] ?? false, false);
     $skill = $useSkills
-        ? api_sakurazaka_skill($prompt)
+        ? api_sakurazaka_skill($currentQuery)
         : array('skills' => array(), 'context' => '', 'results' => array());
+    $learningContext = api_learning_context($currentQuery);
+    if ($learningContext !== '') $prompt = $learningContext . "\n\n" . $prompt;
     if ($skill['context'] !== '') $prompt = $skill['context'] . "\n\n【ユーザーの質問】\n" . $prompt;
     return array($system, $prompt, $skill['skills'], $skill['results']);
 }
@@ -407,7 +438,10 @@ $historyMessages = isset($input['messages']) && is_array($input['messages'])
     : array();
 $hasHistory = count($historyMessages) > 1;
 $threads = lfm_int($env['LFM_THREADS'] ?? 2, 2, 1, 8);
-$context = lfm_int($env['LFM_CONTEXT'] ?? 8192, 8192, 512, 8192);
+$contextLimit = lfm_int($env['LFM_CONTEXT'] ?? 8192, 8192, 512, 8192);
+$estimatedTokens = (int) ceil(lfm_strlen($prompt) * 1.35) + $maxTokens + 256;
+$context = $estimatedTokens <= 2048 ? 2048 : ($estimatedTokens <= 4096 ? 4096 : 8192);
+$context = min($context, $contextLimit);
 $timeout = lfm_int($env['LFM_TIMEOUT_SECONDS'] ?? 300, 300, 10, 300);
 $binary = (string) ($env['LFM_BINARY_PATH'] ?? LFM_BINARY_PATH_DEFAULT);
 $model = (string) ($env['LFM_MODEL_PATH'] ?? LFM_MODEL_PATH_DEFAULT);

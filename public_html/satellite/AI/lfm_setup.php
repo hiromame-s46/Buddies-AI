@@ -803,7 +803,7 @@ $keyForJs = setup_key_provided();
 </style>
 </head>
 <body><main>
-<header><div><h1>LFM セットアップ</h1><span class="version">v<?= htmlspecialchars(LFM_PACKAGE_VERSION) ?> / <?= htmlspecialchars(LFM_BUILD_ID) ?></span><p class="lead">LFM2.5-1.2B-JP-202606を共有サーバーで管理します。</p></div><div class="actions"><a class="button" href="chat.html">チャットを開く</a><button class="secondary" id="refresh">再読込</button></div></header>
+<header><div><h1>LFM セットアップ</h1><span class="version">v<?= htmlspecialchars(LFM_PACKAGE_VERSION) ?> / <?= htmlspecialchars(LFM_BUILD_ID) ?></span><p class="lead">LFM2.5-1.2B-JP-202606を共有サーバーで管理します。</p></div><div class="actions"><a class="button" href="lfm_learning.php?key=<?= urlencode(setup_key_provided()) ?>">基本情報辞書</a><a class="button" href="chat.html">チャットを開く</a><button class="secondary" id="refresh">再読込</button></div></header>
 <div class="grid">
 <section class="card wide"><h2>現在の状態</h2><div id="statusRows" class="rows"></div></section>
 <section class="card"><h2>1. 初期化</h2><p class="note">秘密情報を <code>.lfm-runtime/.env</code> に作成し、公開アクセスを拒否します。</p><div class="actions"><button data-action="init">ランタイムを初期化</button></div></section>

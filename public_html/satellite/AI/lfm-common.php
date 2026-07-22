@@ -32,6 +32,7 @@ define('LFM_LOG_DIR', LFM_RUNTIME_DIR . '/logs');
 define('LFM_TMP_DIR', LFM_RUNTIME_DIR . '/tmp');
 define('LFM_RATE_DIR', LFM_RUNTIME_DIR . '/rate-limit');
 define('LFM_LOCK_FILE', LFM_RUNTIME_DIR . '/generation.lock');
+define('LFM_LEARNING_FILE', LFM_RUNTIME_DIR . '/learning-dictionary.json');
 
 function lfm_function_available(string $name): bool
 {
