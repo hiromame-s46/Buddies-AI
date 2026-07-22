@@ -33,6 +33,56 @@ define('LFM_TMP_DIR', LFM_RUNTIME_DIR . '/tmp');
 define('LFM_RATE_DIR', LFM_RUNTIME_DIR . '/rate-limit');
 define('LFM_LOCK_FILE', LFM_RUNTIME_DIR . '/generation.lock');
 define('LFM_LEARNING_FILE', LFM_RUNTIME_DIR . '/learning-dictionary.json');
+define('LFM_SKILL_INDEX_DIR', LFM_CACHE_DIR . '/skill-experts-v1');
+
+function lfm_buddies_admin_user(): ?array
+{
+    $token = trim((string) ($_SERVER['HTTP_X_SESSION_TOKEN'] ?? $_SERVER['HTTP_AUTHORIZATION'] ?? ($_COOKIE['sakulabo_token'] ?? '')));
+    $token = preg_replace('/^Bearer\s+/i', '', $token) ?? '';
+    if ($token === '') return null;
+
+    $configPath = LFM_BASE_DIR . '/../../../api/config.php';
+    if (!is_file($configPath)) return null;
+    try {
+        $config = require $configPath;
+        if (!is_array($config)) return null;
+        $pdo = new PDO(
+            sprintf('mysql:host=%s;dbname=%s;charset=utf8mb4', $config['host'], $config['dbname']),
+            $config['username'],
+            $config['password'],
+            array(PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC, PDO::ATTR_TIMEOUT => 5)
+        );
+        $statement = $pdo->prepare(
+            'SELECT u.id, u.username, u.display_name FROM sakulabo_users u '
+            . 'JOIN sakulabo_sessions s ON s.user_id = u.id '
+            . 'WHERE s.token = ? AND s.expires_at > NOW() AND u.id = 1 LIMIT 1'
+        );
+        $statement->execute(array($token));
+        $user = $statement->fetch();
+        return is_array($user) ? $user : null;
+    } catch (Throwable $error) {
+        error_log('Buddies AI auth: ' . $error->getMessage());
+        return null;
+    }
+}
+
+function lfm_require_buddies_admin(bool $json = false, string $title = 'Buddies AI 管理'): array
+{
+    $user = lfm_buddies_admin_user();
+    if ($user) return $user;
+    if ($json) {
+        lfm_json_response(array('ok' => false, 'error' => 'uid=1 のBuddies Profileでログインしてください。'), 401);
+    }
+
+    http_response_code(401);
+    header('Content-Type: text/html; charset=utf-8');
+    $safeTitle = htmlspecialchars($title, ENT_QUOTES, 'UTF-8');
+    echo '<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="robots" content="noindex,nofollow"><title>' . $safeTitle . '</title><style>'
+        . ':root{font-family:-apple-system,BlinkMacSystemFont,"Noto Sans JP",sans-serif;color:#242229;background:#fbfafb}*{box-sizing:border-box}body{margin:0;min-height:100dvh;display:grid;place-items:center;padding:18px}.login{width:min(420px,100%);padding:25px;border:1px solid #eee3e8;border-radius:20px;background:#fff;box-shadow:0 18px 55px #6c315714}h1{margin:0 0 7px;font-size:25px}p{margin:0 0 19px;color:#77717a;line-height:1.7;font-size:13px}.fields{display:grid;gap:10px}input{width:100%;padding:12px 13px;border:1px solid #e3d7dc;border-radius:12px;font:inherit;font-size:16px;outline:0}input:focus{border-color:#d8799b;box-shadow:0 0 0 3px #d8799b1f}button{border:0;border-radius:12px;padding:12px;background:#d8799b;color:#fff;font:inherit;font-weight:800;cursor:pointer}.notice{min-height:20px;margin-top:11px;color:#a72e43;font-size:12px}</style></head><body><main class="login"><h1>' . $safeTitle . '</h1><p>管理機能を開くには、Buddies Profileのuid=1でログインしてください。</p><form id="login" class="fields"><input id="username" autocomplete="username" placeholder="Buddies Profile ユーザー名" required><input id="password" type="password" autocomplete="current-password" placeholder="パスワード" required><button type="submit">ログイン</button></form><div id="notice" class="notice" role="status"></div></main><script>'
+        . "const form=document.getElementById('login'),notice=document.getElementById('notice');form.addEventListener('submit',async event=>{event.preventDefault();notice.textContent='ログイン中…';const button=form.querySelector('button');button.disabled=true;try{const response=await fetch('../api.php?action=auth_login',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:document.getElementById('username').value.trim(),password:document.getElementById('password').value})});const data=await response.json();if(!response.ok||data.ok===false||!data.user)throw new Error(data.error||'ログインできませんでした。');if(Number(data.user.id)!==1)throw new Error('このページはuid=1のみ利用できます。');location.reload();}catch(error){notice.textContent=error.message;button.disabled=false;}});"
+        . '</script></body></html>';
+    exit;
+}
 
 function lfm_function_available(string $name): bool
 {
@@ -138,7 +188,6 @@ function lfm_write_env(array $values, string $path = LFM_ENV_FILE): void
 function lfm_default_env(): array
 {
     return array(
-        'LFM_SETUP_KEY' => bin2hex(random_bytes(24)),
         'LFM_API_KEY' => bin2hex(random_bytes(32)),
         'LFM_PUBLIC_CHAT' => 'true',
         'LFM_ALLOWED_ORIGIN' => '',

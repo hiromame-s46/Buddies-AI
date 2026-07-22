@@ -13,41 +13,12 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/lfm-common.php';
 
-const LFM_BOOTSTRAP_SETUP_KEY = 'lfm-setup-change-me-400'; // 必ず変更してください。
 const LFM_DOWNLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 const LFM_SOURCE_URL = 'https://github.com/ggml-org/llama.cpp/archive/refs/heads/master.tar.gz';
 
-function setup_key_provided(): string
-{
-    return trim((string) ($_GET['key'] ?? $_POST['key'] ?? $_SERVER['HTTP_X_INSTALL_KEY'] ?? ''));
-}
-
-function setup_authorized(): bool
-{
-    $provided = setup_key_provided();
-    if ($provided === '') {
-        return false;
-    }
-    if (hash_equals(LFM_BOOTSTRAP_SETUP_KEY, $provided)) {
-        return true;
-    }
-    $stored = lfm_parse_env();
-    $expected = (string) ($stored['LFM_SETUP_KEY'] ?? '');
-    return $expected !== '' && hash_equals($expected, $provided);
-}
-
 function setup_require_auth(bool $json = false): void
 {
-    if (setup_authorized()) {
-        return;
-    }
-    if ($json) {
-        lfm_json_response(array('ok' => false, 'error' => 'インストールキーが正しくありません。'), 403);
-    }
-    http_response_code(403);
-    header('Content-Type: text/plain; charset=utf-8');
-    echo "403 Forbidden\n\nURLに ?key=インストールキー を付けてください。\n";
-    exit;
+    lfm_require_buddies_admin($json, 'Buddies AI セットアップ');
 }
 
 function setup_ok(string $message, array $extra = array()): void
@@ -97,7 +68,6 @@ function setup_status(): array
 {
     $env = lfm_load_env(false);
     if (!is_file(LFM_ENV_FILE)) {
-        $env['LFM_SETUP_KEY'] = '';
         $env['LFM_API_KEY'] = '';
     }
     $binary = (string) ($env['LFM_BINARY_PATH'] ?? LFM_BINARY_PATH_DEFAULT);
@@ -145,7 +115,6 @@ function setup_status(): array
         'binary_version' => lfm_substr($binaryVersion, 0, 800),
         'dependency_report' => lfm_substr($dependencyReport, 0, 4000),
         'env_exists' => is_file(LFM_ENV_FILE),
-        'setup_key_masked' => setup_mask((string) ($env['LFM_SETUP_KEY'] ?? '')),
         'api_key_masked' => setup_mask((string) ($env['LFM_API_KEY'] ?? '')),
         'public_chat' => lfm_bool($env['LFM_PUBLIC_CHAT'] ?? 'true', true),
         'api_directory' => (string) ($env['LFM_API_DIRECTORY'] ?? 'lfm-api.php'),
@@ -176,11 +145,10 @@ function setup_initialize(): void
     $env = lfm_parse_env();
     if (!$already) {
         $env = lfm_default_env();
-        // Keep the currently used key valid after initialization.
-        $env['LFM_SETUP_KEY'] = setup_key_provided() !== '' ? setup_key_provided() : LFM_BOOTSTRAP_SETUP_KEY;
     } else {
         $env = array_replace(lfm_default_env(), $env);
     }
+    unset($env['LFM_SETUP_KEY']);
     $env['LFM_BINARY_PATH'] = $env['LFM_BINARY_PATH'] ?? LFM_BINARY_PATH_DEFAULT;
     $env['LFM_MODEL_PATH'] = $env['LFM_MODEL_PATH'] ?? LFM_MODEL_PATH_DEFAULT;
     $env['LFM_LIBRARY_PATH'] = $env['LFM_LIBRARY_PATH'] ?? LFM_LIB_DIR;
@@ -199,6 +167,7 @@ function setup_save_settings(): void
 {
     lfm_prepare_runtime();
     $env = lfm_load_env(true);
+    unset($env['LFM_SETUP_KEY']);
     $env['LFM_PUBLIC_CHAT'] = isset($_POST['public_chat']) && $_POST['public_chat'] === 'true' ? 'true' : 'false';
     $env['LFM_ALLOWED_ORIGIN'] = trim((string) ($_POST['allowed_origin'] ?? ''));
     $env['LFM_API_DIRECTORY'] = trim((string) ($_POST['api_directory'] ?? 'lfm-api.php')) ?: 'lfm-api.php';
@@ -214,18 +183,17 @@ function setup_save_settings(): void
     setup_ok('設定を保存しました。', array('status' => setup_status()));
 }
 
-function setup_regenerate_keys(): void
+function setup_regenerate_api_key(): void
 {
     $confirmation = trim((string) ($_POST['confirm'] ?? ''));
     if ($confirmation !== 'REGENERATE') {
         setup_fail('確認文字列が正しくありません。', 422);
     }
     $env = lfm_load_env(true);
-    $env['LFM_SETUP_KEY'] = bin2hex(random_bytes(24));
     $env['LFM_API_KEY'] = bin2hex(random_bytes(32));
+    unset($env['LFM_SETUP_KEY']);
     lfm_write_env($env);
-    setup_ok('キーを再生成しました。新しいセットアップキーを必ず保存してください。', array(
-        'setup_key' => $env['LFM_SETUP_KEY'],
+    setup_ok('外部APIキーを再生成しました。', array(
         'api_key' => $env['LFM_API_KEY'],
     ));
 }
@@ -354,6 +322,7 @@ function setup_download_range(string $url, int $start, int $end, string $destina
         fclose($in);
         throw new RuntimeException('一時ファイルを作成できません。');
     }
+    $streamMeta = stream_get_meta_data($in);
     $bytes = (int) stream_copy_to_stream($in, $out);
     fclose($in);
     fclose($out);
@@ -362,12 +331,11 @@ function setup_download_range(string $url, int $start, int $end, string $destina
         throw new RuntimeException('モデルの取得結果が空です。');
     }
     $total = 0;
-    if (isset($http_response_header) && is_array($http_response_header)) {
-        foreach ($http_response_header as $headerLine) {
+    $responseHeaders = is_array($streamMeta['wrapper_data'] ?? null) ? $streamMeta['wrapper_data'] : array();
+    foreach ($responseHeaders as $headerLine) {
             if (preg_match('/^Content-Range:\s*bytes\s+\d+-\d+\/(\d+)/i', (string) $headerLine, $match)) {
                 $total = (int) $match[1];
             }
-        }
     }
     return array('bytes' => $bytes, 'http_code' => 206, 'total' => $total);
 }
@@ -769,7 +737,7 @@ if ($action !== '') {
             case 'status': lfm_json_response(array('ok' => true, 'status' => setup_status()));
             case 'init': setup_initialize(); break;
             case 'save_settings': setup_save_settings(); break;
-            case 'regenerate_keys': setup_regenerate_keys(); break;
+            case 'regenerate_api_key': setup_regenerate_api_key(); break;
             case 'model_info': setup_model_info(); break;
             case 'download_model_chunk': setup_download_model_chunk(); break;
             case 'delete_model': setup_delete_model(); break;
@@ -790,7 +758,6 @@ if ($action !== '') {
 
 setup_require_auth(false);
 $status = setup_status();
-$keyForJs = setup_key_provided();
 ?><!doctype html>
 <html lang="ja">
 <head>
@@ -803,7 +770,7 @@ $keyForJs = setup_key_provided();
 </style>
 </head>
 <body><main>
-<header><div><h1>LFM セットアップ</h1><span class="version">v<?= htmlspecialchars(LFM_PACKAGE_VERSION) ?> / <?= htmlspecialchars(LFM_BUILD_ID) ?></span><p class="lead">LFM2.5-1.2B-JP-202606を共有サーバーで管理します。</p></div><div class="actions"><a class="button" href="lfm_learning.php?key=<?= urlencode(setup_key_provided()) ?>">基本情報辞書</a><a class="button" href="chat.html">チャットを開く</a><button class="secondary" id="refresh">再読込</button></div></header>
+<header><div><h1>LFM セットアップ</h1><span class="version">v<?= htmlspecialchars(LFM_PACKAGE_VERSION) ?> / <?= htmlspecialchars(LFM_BUILD_ID) ?></span><p class="lead">LFM2.5-1.2B-JP-202606を共有サーバーで管理します。</p></div><div class="actions"><a class="button" href="lfm_learning.php">基本情報辞書</a><a class="button" href="chat.html">チャットを開く</a><button class="secondary" id="refresh">再読込</button></div></header>
 <div class="grid">
 <section class="card wide"><h2>現在の状態</h2><div id="statusRows" class="rows"></div></section>
 <section class="card"><h2>1. 初期化</h2><p class="note">秘密情報を <code>.lfm-runtime/.env</code> に作成し、公開アクセスを拒否します。</p><div class="actions"><button data-action="init">ランタイムを初期化</button></div></section>
@@ -811,21 +778,20 @@ $keyForJs = setup_key_provided();
 <section class="card"><h2>3. モデル</h2><p class="note">公式Q4_K_M（約731MB）を8MBずつ取得するため、PHPの1リクエスト制限を回避します。</p><div class="progress"><div id="modelBar" class="bar"></div></div><div id="modelProgress" class="note">未確認</div><div class="actions"><button id="downloadModel">モデルをダウンロード</button><button class="secondary" data-action="model_info">容量を確認</button><button class="secondary" data-action="test_inference">推論テスト</button></div></section>
 <section class="card wide"><h2>公開チャット設定</h2><form id="settingsForm"><div class="settings-grid"><div class="field"><label>公開チャット</label><select name="public_chat"><option value="true">有効</option><option value="false">無効</option></select></div><div class="field"><label>10分間等の回数</label><input name="rate_requests" type="number" min="1" max="1000" value="6"></div><div class="field"><label>制限時間（秒）</label><input name="rate_window" type="number" min="10" max="86400" value="600"></div><div class="field"><label>入力文字数上限</label><input name="max_prompt_chars" type="number" min="256" max="20000" value="4000"></div><div class="field"><label>最大出力トークン</label><input name="max_output_tokens" type="number" min="16" max="1024" value="256"></div><div class="field"><label>推論タイムアウト（秒）</label><input name="timeout_seconds" type="number" min="10" max="300" value="150"></div><div class="field"><label>CPUスレッド</label><input name="threads" type="number" min="1" max="8" value="1"></div><div class="field"><label>コンテキスト</label><input name="context" type="number" min="512" max="8192" value="2048"></div><div class="field"><label>許可Origin（空欄＝同一ドメイン）</label><input name="allowed_origin" type="url" placeholder="https://example.com"></div></div><div class="actions"><button type="submit">設定を保存</button></div></form></section>
 <section class="card"><h2>削除・整理</h2><p class="warning note">削除操作は元に戻せません。モデル削除とキャッシュ削除は、llama.cpp・.envを残します。</p><div class="actions"><button class="danger" data-confirm-action="delete_model" data-confirm="DELETE MODEL">モデルを削除</button><button class="secondary" data-confirm-action="delete_cache" data-confirm="DELETE CACHE">キャッシュを削除</button><button class="danger" data-confirm-action="delete_runtime" data-confirm="DELETE ALL RUNTIME">ランタイム全削除</button></div></section>
-<section class="card"><h2>キー</h2><p class="note">APIキーはHTMLに埋め込まれません。公開チャットはキーなし、外部API呼び出しだけ <code>X-API-Key</code> を使えます。</p><div class="actions"><button class="danger" id="regenerateKeys">セットアップ/APIキーを再生成</button></div></section>
+<section class="card"><h2>外部API</h2><p class="note">管理画面はBuddies Profileのuid=1で保護されています。APIキーは外部API呼び出しだけに使用します。</p><div class="actions"><button class="danger" id="regenerateApiKey">外部APIキーを再生成</button></div></section>
 <section class="card wide"><h2>操作結果・診断</h2><pre id="output" class="output">準備完了</pre></section>
 </div></main><div id="toast" class="toast"></div>
 <script>
 'use strict';
-const KEY=<?= json_encode($keyForJs, JSON_UNESCAPED_UNICODE|JSON_UNESCAPED_SLASHES) ?>;
 const endpoint=location.pathname;
 const $=id=>document.getElementById(id);
 let busy=false;
 function toast(text){const t=$('toast');t.textContent=text;t.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>t.classList.remove('show'),2100)}
 function show(data){$('output').textContent=typeof data==='string'?data:JSON.stringify(data,null,2);$('output').scrollTop=$('output').scrollHeight}
-async function request(action,form=null){const url=`${endpoint}?key=${encodeURIComponent(KEY)}&action=${encodeURIComponent(action)}&v=${Date.now()}`;const options={method:form?'POST':'GET',cache:'no-store'};if(form)options.body=form;const response=await fetch(url,options);const raw=await response.text();let data;try{data=JSON.parse(raw)}catch{throw new Error(`JSONではない応答: ${raw.slice(0,500)}`)}if(!response.ok||!data.ok)throw new Error(data.error||`HTTP ${response.status}`);return data}
+async function request(action,form=null){const url=`${endpoint}?action=${encodeURIComponent(action)}&v=${Date.now()}`;const options={method:form?'POST':'GET',cache:'no-store',credentials:'same-origin'};if(form)options.body=form;const response=await fetch(url,options);const raw=await response.text();let data;try{data=JSON.parse(raw)}catch{throw new Error(`JSONではない応答: ${raw.slice(0,500)}`)}if(!response.ok||!data.ok)throw new Error(data.error||`HTTP ${response.status}`);return data}
 function badge(ok){return `<span class="pill ${ok?'ok':'bad'}">${ok?'OK':'NG'}</span>`}
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
-function renderStatus(s){const rows=[['パッケージ',`${esc(s.version)} / ${esc(s.build_id)}`],['実行ファイル',esc(s.executing_file)],['SHA-256',esc(s.file_sha256)],['設置ディレクトリ',esc(s.base_dir)],['インストールディレクトリ',esc(s.runtime_dir)],['.env',`${badge(s.env_exists)} ${esc(s.env_file)}`],['llama-cli',`${badge(s.binary_installed)} ${esc(s.binary_path)} (${esc(s.binary_size)})`],['モデル',`${badge(s.model_installed)} ${esc(s.model_path)} (${esc(s.model_size)})`],['公開チャット',badge(s.public_chat)],['PHP実行方式',esc(s.process_backend)],['PHP / CPU',`${esc(s.php)} / ${esc(s.architecture)}`],['空き容量',esc(s.free_space)],['ランタイム容量',esc(s.runtime_size)],['APIキー',esc(s.api_key_masked)],['セットアップキー',esc(s.setup_key_masked)]];$('statusRows').innerHTML=rows.map(([a,b])=>`<div class="row"><div class="label">${a}</div><div class="value">${b}</div></div>`).join('');if(s.binary_version)show(`llama-cli:\n${s.binary_version}\n\n依存関係:\n${s.dependency_report||'lddなし'}`);const f=$('settingsForm');f.public_chat.value=s.public_chat?'true':'false';f.rate_requests.value=s.rate_limit.requests;f.rate_window.value=s.rate_limit.window;updateModelProgress(s.model_partial_size||0,s.model_installed?(s.model_partial_size||1):0,s.model_installed)}
+function renderStatus(s){const rows=[['パッケージ',`${esc(s.version)} / ${esc(s.build_id)}`],['実行ファイル',esc(s.executing_file)],['SHA-256',esc(s.file_sha256)],['設置ディレクトリ',esc(s.base_dir)],['インストールディレクトリ',esc(s.runtime_dir)],['.env',`${badge(s.env_exists)} ${esc(s.env_file)}`],['llama-cli',`${badge(s.binary_installed)} ${esc(s.binary_path)} (${esc(s.binary_size)})`],['モデル',`${badge(s.model_installed)} ${esc(s.model_path)} (${esc(s.model_size)})`],['公開チャット',badge(s.public_chat)],['PHP実行方式',esc(s.process_backend)],['PHP / CPU',`${esc(s.php)} / ${esc(s.architecture)}`],['空き容量',esc(s.free_space)],['ランタイム容量',esc(s.runtime_size)],['外部APIキー',esc(s.api_key_masked)]];$('statusRows').innerHTML=rows.map(([a,b])=>`<div class="row"><div class="label">${a}</div><div class="value">${b}</div></div>`).join('');if(s.binary_version)show(`llama-cli:\n${s.binary_version}\n\n依存関係:\n${s.dependency_report||'lddなし'}`);const f=$('settingsForm');f.public_chat.value=s.public_chat?'true':'false';f.rate_requests.value=s.rate_limit.requests;f.rate_window.value=s.rate_limit.window;updateModelProgress(s.model_partial_size||0,s.model_installed?(s.model_partial_size||1):0,s.model_installed)}
 async function refresh(){try{const data=await request('status');renderStatus(data.status);$('settingsForm').api_directory.value=data.status.api_directory||'lfm-api.php';$('settingsForm').system_prompt.value=data.status.system_prompt||''}catch(e){show(e.message);toast('状態取得に失敗しました')}}
 async function act(action,form=null){if(busy)return;busy=true;try{show(`${action} を実行中…`);const data=await request(action,form);show(data);toast(data.message||'完了');if(data.status)renderStatus(data.status);else await refresh()}catch(e){show(e.stack||e.message);toast('エラーが発生しました')}finally{busy=false}}
 document.querySelectorAll('[data-action]').forEach(b=>b.addEventListener('click',()=>act(b.dataset.action)));
@@ -835,7 +801,7 @@ $('bundleForm').addEventListener('submit',e=>{e.preventDefault();const f=new For
 (()=>{const f=$('settingsForm'),grid=f.querySelector('.settings-grid');const extra=document.createElement('div');extra.className='field';extra.innerHTML='<label>APIディレクトリ</label><input name="api_directory" value="lfm-api.php" autocomplete="off"><label>システムプロンプト</label><textarea name="system_prompt" rows="5" style="width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)"></textarea>';grid.prepend(extra);})();
 (()=>{const f=document.createElement('section');f.className='card wide';f.innerHTML='<h2>AI辞書管理</h2><p class="note">櫻坂関連のテーマを指定すると、AIがJSON形式の用語候補を作成し、重複を除いて辞書へ追加します。保存前に操作結果を確認してください。</p><div class="field"><label>生成テーマ</label><input id="dictionaryTopic" value="櫻坂46の基本用語・活動・楽曲・ファン用語"></div><div class="actions"><button type="button" id="generateDictionary">AIで用語候補を生成して登録</button></div>';document.querySelector('.grid').insertBefore(f,document.querySelector('.grid').lastElementChild);$('generateDictionary').onclick=()=>{const form=new FormData();form.set('topic',$('dictionaryTopic').value);act('generate_dictionary',form)};})();
 $('settingsForm').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.currentTarget);f.set('public_chat',e.currentTarget.public_chat.value);act('save_settings',f)});
-$('regenerateKeys').addEventListener('click',async()=>{const typed=prompt('実行するには「REGENERATE」と入力してください。');if(typed!=='REGENERATE')return;const f=new FormData();f.set('confirm',typed);try{const d=await request('regenerate_keys',f);show(`新しいセットアップキー:\n${d.setup_key}\n\n新しい外部APIキー:\n${d.api_key}\n\nこの画面を閉じる前に保存してください。`);toast('キーを再生成しました')}catch(e){show(e.message)}});
+$('regenerateApiKey').addEventListener('click',async()=>{const typed=prompt('実行するには「REGENERATE」と入力してください。');if(typed!=='REGENERATE')return;const f=new FormData();f.set('confirm',typed);try{const d=await request('regenerate_api_key',f);show(`新しい外部APIキー:\n${d.api_key}\n\nこの画面を閉じる前に保存してください。`);toast('外部APIキーを再生成しました')}catch(e){show(e.message)}});
 function updateModelProgress(done,total,installed=false){let pct=installed?100:(total?Math.min(100,done/total*100):0);$('modelBar').style.width=pct+'%';$('modelProgress').textContent=installed?'インストール済み':`${(done/1024/1024).toFixed(1)} MB / ${total?(total/1024/1024).toFixed(1)+' MB':'容量取得中'}`}
 $('downloadModel').addEventListener('click',async()=>{if(busy)return;busy=true;$('downloadModel').disabled=true;try{let info=await request('model_info');let total=Number(info.total)||0,done=Number(info.downloaded)||0;updateModelProgress(done,total,info.installed);if(info.installed){toast('モデルはインストール済みです');return}while(true){const data=await request('download_model_chunk',new FormData());done=Number(data.downloaded)||done;total=Number(data.total)||total;updateModelProgress(done,total,!!data.done);show(data);if(data.done)break}toast('モデルのインストール完了');await refresh()}catch(e){show(e.stack||e.message);toast('ダウンロードに失敗しました')}finally{busy=false;$('downloadModel').disabled=false}});
 refresh();
