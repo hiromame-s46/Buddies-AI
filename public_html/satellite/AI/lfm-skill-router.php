@@ -48,23 +48,16 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
     $query = trim($query);
     $dataDir = $dataDir ?: dirname(__DIR__) . '/data';
     $domain = preg_match('/櫻坂|欅坂|サクラミーツ|さくみみ|Buddies|BACKS|三期生|二期生|一期生/u', $query) === 1;
-    $compact = preg_replace('/[\s　]+/u', '', $query) ?? $query;
-    $memberMatch = false;
-    if (!$domain && preg_match('/誕生日|身長|出身|プロフィール|メンバー|誰/u', $query)) {
-        foreach (api_skill_member_names($dataDir) as $name) {
-            if ($name !== '' && mb_strpos($compact, $name, 0, 'UTF-8') !== false) {
-                $memberMatch = true;
-                $domain = true;
-                break;
-            }
-        }
-    }
+    $memberTarget = api_skill_member_target($query, $dataDir);
+    $memberMatch = $memberTarget !== '';
+    if ($memberMatch) $domain = true;
 
     $today = new DateTimeImmutable('now', new DateTimeZone('Asia/Tokyo'));
     $plan = array(
         'requires_skill' => false, 'skills' => array(), 'intent' => 'conversation',
         'sources' => array(), 'sort' => 'relevance', 'date_filter' => '',
-        'description' => '', 'reference_date' => $today->format('Y-m-d'),
+        'filters' => $memberMatch ? array('member_name' => $memberTarget) : array(),
+        'limit' => 6, 'description' => '', 'reference_date' => $today->format('Y-m-d'),
     );
 
     if (preg_match('/今日(?:の)?(?:予定|スケジュール|出演)|本日(?:の)?(?:予定|出演)/u', $query) || ($domain && preg_match('/今日|本日/u', $query))) {
@@ -95,7 +88,7 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
             'description' => 'さくみみの配信情報を新しい順に検索',
         ));
     }
-    if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query) || ($domain && preg_match('/最新|最近|近況|動向/u', $query))) {
+    if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query) || ($domain && !preg_match('/ブログ/u', $query) && preg_match('/最新|最近|近況|動向/u', $query))) {
         return array_merge($plan, array(
             'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest',
             'sources' => array('sakurazaka_news.json', 'blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest',
@@ -106,7 +99,62 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
         return array_merge($plan, array(
             'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest',
             'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest',
-            'description' => 'メンバーブログを投稿日が新しい順に並べて検索',
+            'description' => ($memberMatch ? $memberTarget . 'の' : 'メンバー') . 'ブログを投稿日が新しい順に検索',
+        ));
+    }
+
+    if (preg_match('/ペンライト|サイリウム/u', $query)) {
+        $plan['filters']['text_query'] = $query;
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-music'), 'intent' => 'penlight_search',
+            'sources' => array('cyalume.json'), 'sort' => 'relevance', 'limit' => 4,
+            'description' => 'ペンライトカラーデータだけを対象に検索',
+        ));
+    }
+    if (preg_match('/MV|ミュージックビデオ/u', $query)) {
+        $plan['filters']['text_query'] = $query;
+        $itemTarget = api_skill_item_target($query, $dataDir, array('sakamichi_sakura_mvs.json'));
+        if ($itemTarget !== '') $plan['filters']['item_title'] = $itemTarget;
+        if ($memberMatch) $plan['filters']['member_field'] = preg_match('/センター/u', $query) ? 'centers' : 'members';
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-music'), 'intent' => 'mv_search',
+            'sources' => array('sakamichi_sakura_mvs.json'), 'sort' => 'relevance', 'limit' => 4,
+            'description' => 'MVデータだけを条件一致で検索',
+        ));
+    }
+    if (preg_match('/曲|楽曲|歌|センター|作曲|作詞|編曲|シングル|アルバム|リリース/u', $query)) {
+        $plan['filters']['text_query'] = $query;
+        $itemTarget = api_skill_item_target($query, $dataDir, array('sakamichi_sakura_songs.json', 'sakurazaka46_songs.json'));
+        if ($itemTarget !== '') $plan['filters']['item_title'] = $itemTarget;
+        if ($memberMatch) $plan['filters']['member_field'] = preg_match('/センター/u', $query) ? 'centers' : 'members';
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-music'), 'intent' => 'music_search',
+            'sources' => array('sakamichi_sakura_songs.json', 'sakurazaka46_songs.json'), 'sort' => 'relevance', 'limit' => 4,
+            'description' => '楽曲データだけを条件一致で検索',
+        ));
+    }
+    if (preg_match('/セトリ|セットリスト/u', $query)) {
+        $plan['filters']['text_query'] = $query;
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-live'), 'intent' => 'setlist_search',
+            'sources' => array('sakamichi_sakura_setlists.json'), 'sort' => 'relevance', 'limit' => 4,
+            'description' => 'セットリストデータだけを条件一致で検索',
+        ));
+    }
+    if (preg_match('/ライブ|公演|ツアー|会場/u', $query)) {
+        $plan['filters']['text_query'] = $query;
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-live'), 'intent' => 'live_search',
+            'sources' => array('sakamichi_sakura_lives.json'), 'sort' => 'relevance', 'limit' => 4,
+            'description' => 'ライブ情報だけを条件一致で検索',
+        ));
+    }
+
+    if ($memberMatch) {
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-members'), 'intent' => 'member_profile',
+            'sources' => array('member.json', 'member_grad.json'), 'sort' => 'exact', 'date_filter' => '', 'limit' => 1,
+            'description' => $memberTarget . 'のメンバー情報だけを完全一致で検索',
         ));
     }
 
@@ -128,6 +176,8 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
     if ($plan['skills']) {
         $plan['requires_skill'] = true;
         $plan['intent'] = 'knowledge_search';
+        $plan['filters']['text_query'] = $query;
+        $plan['limit'] = 4;
         $plan['description'] = '関連する櫻坂46データを絞り込んで検索';
     }
     return $plan;
@@ -183,6 +233,71 @@ function api_skill_member_names(string $dataDir): array
     lfm_ensure_dir(LFM_SKILL_INDEX_DIR);
     lfm_write_json($cacheFile, array('signature' => $signature, 'names' => array_keys($names)));
     return array_keys($names);
+}
+
+function api_skill_member_target(string $query, string $dataDir): string
+{
+    static $cache = array();
+    $sources = array($dataDir . '/member.json', $dataDir . '/member_grad.json');
+    $signature = implode(':', array_map(static fn(string $path): string => is_file($path) ? (string) filemtime($path) : '0', $sources));
+    if (!isset($cache[$signature])) {
+        $cacheFile = LFM_SKILL_INDEX_DIR . '/member-aliases.json';
+        $saved = lfm_read_json($cacheFile);
+        if (($saved['signature'] ?? '') === $signature && is_array($saved['aliases'] ?? null)) {
+            $aliases = $saved['aliases'];
+        } else {
+            $aliases = array();
+            foreach ($sources as $path) {
+                $items = json_decode((string) @file_get_contents($path), true);
+                if (!is_array($items)) continue;
+                foreach ($items as $item) {
+                    if (!is_array($item)) continue;
+                    $canonical = trim((string) ($item['name'] ?? ''));
+                    if ($canonical === '') continue;
+                    foreach (array($canonical, $item['kana'] ?? '', $item['name_kana'] ?? '', $item['english'] ?? '', $item['english_name'] ?? '') as $alias) {
+                        $normalized = mb_strtolower(preg_replace('/[\s　]+/u', '', trim((string) $alias)) ?? '', 'UTF-8');
+                        if ($normalized !== '') $aliases[$normalized] = $canonical;
+                    }
+                }
+            }
+            lfm_ensure_dir(LFM_SKILL_INDEX_DIR);
+            lfm_write_json($cacheFile, array('signature' => $signature, 'aliases' => $aliases));
+        }
+        uksort($aliases, static fn(string $a, string $b): int => mb_strlen($b, 'UTF-8') <=> mb_strlen($a, 'UTF-8'));
+        $cache[$signature] = $aliases;
+    }
+    $compact = mb_strtolower(preg_replace('/[\s　]+/u', '', $query) ?? $query, 'UTF-8');
+    foreach ($cache[$signature] as $alias => $canonical) {
+        if (mb_strpos($compact, $alias, 0, 'UTF-8') !== false) return $canonical;
+    }
+    return '';
+}
+
+function api_skill_exact_normalize(string $text): string
+{
+    $text = str_replace(array('’', '‘', '＇', '“', '”'), array("'", "'", "'", '"', '"'), $text);
+    return mb_strtolower(preg_replace('/[\p{P}\p{S}\s　]+/u', '', $text) ?? $text, 'UTF-8');
+}
+
+function api_skill_item_target(string $query, string $dataDir, array $files): string
+{
+    $normalizedQuery = api_skill_exact_normalize($query);
+    $targets = array();
+    foreach ($files as $file) {
+        $items = json_decode((string) @file_get_contents($dataDir . '/' . $file), true);
+        if (!is_array($items)) continue;
+        foreach ($items as $item) {
+            if (!is_array($item)) continue;
+            $title = trim((string) ($item['title'] ?? $item['name'] ?? $item['song'] ?? ''));
+            $normalizedTitle = api_skill_exact_normalize($title);
+            if (mb_strlen($normalizedTitle, 'UTF-8') >= 3 && mb_strpos($normalizedQuery, $normalizedTitle, 0, 'UTF-8') !== false) {
+                $targets[$normalizedTitle] = $title;
+            }
+        }
+    }
+    if (!$targets) return '';
+    uksort($targets, static fn(string $a, string $b): int => mb_strlen($b, 'UTF-8') <=> mb_strlen($a, 'UTF-8'));
+    return (string) reset($targets);
 }
 
 function api_skill_route(string $query, string $dataDir): array
@@ -287,10 +402,13 @@ function api_skill_search_source(string $path, string $query, int $limit = 8): a
         }
     }
     arsort($scores);
+    $maxScore = $scores ? (int) reset($scores) : 0;
+    $minimumScore = max(2, (int) ceil($maxScore * 0.35));
     $handle = @fopen($cacheDir . '/documents.jsonl', 'rb');
     if (!is_resource($handle)) return array();
     $hits = array();
     foreach (array_slice($scores, 0, $limit, true) as $documentId => $score) {
+        if ((int) $score < $minimumScore) continue;
         $position = $meta['offsets'][(string) $documentId] ?? $meta['offsets'][$documentId] ?? null;
         if (!is_array($position) || fseek($handle, (int) $position[0]) !== 0) continue;
         $decoded = json_decode((string) fread($handle, (int) $position[1]), true);
@@ -303,7 +421,7 @@ function api_skill_search_source(string $path, string $query, int $limit = 8): a
 
 function api_skill_item_sort_key(array $value, string $file): int
 {
-    foreach (array('date', 'published_at', 'start_date', 'datetime') as $field) {
+    foreach (array('date', 'published_at', 'start_date', 'datetime', 'releasedate') as $field) {
         $raw = trim((string) ($value[$field] ?? ''));
         if ($raw === '') continue;
         $timestamp = strtotime(str_replace('/', '-', $raw));
@@ -327,6 +445,7 @@ function api_skill_temporal_hits(string $path, string $file, string $label, arra
     $hits = array();
     foreach ($items as $key => $item) {
         if (!is_array($item)) continue;
+        if (!api_skill_value_matches_filters($item, $plan['filters'] ?? array(), $file)) continue;
         $date = str_replace('/', '-', trim((string) ($item['date'] ?? '')));
         if ($plan['date_filter'] === 'today' || $plan['date_filter'] === 'tomorrow') {
             if ($date !== $targetDate) continue;
@@ -346,6 +465,48 @@ function api_skill_temporal_hits(string $path, string $file, string $label, arra
     usort($hits, static function (array $a, array $b) use ($ascending): int {
         return $ascending ? ($a['sort_key'] <=> $b['sort_key']) : ($b['sort_key'] <=> $a['sort_key']);
     });
+    return array_slice($hits, 0, $limit);
+}
+
+function api_skill_value_matches_filters(array $value, array $filters, string $file): bool
+{
+    $itemTitle = trim((string) ($filters['item_title'] ?? ''));
+    if ($itemTitle !== '') {
+        $actualTitle = (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? '');
+        if (api_skill_exact_normalize($actualTitle) !== api_skill_exact_normalize($itemTitle)) return false;
+    }
+    $target = trim((string) ($filters['member_name'] ?? ''));
+    if ($target === '') return true;
+    $normalize = static fn(string $text): string => mb_strtolower(preg_replace('/[\s　]+/u', '', $text) ?? $text, 'UTF-8');
+    $needle = $normalize($target);
+    $memberField = (string) ($filters['member_field'] ?? '');
+    $candidates = $memberField === '' ? array($value['name'] ?? '', $value['member'] ?? '', $value['author'] ?? '') : array();
+    $arrayField = $memberField !== '' ? $memberField : 'members';
+    if (is_array($value[$arrayField] ?? null)) $candidates = array_merge($candidates, $value[$arrayField]);
+    foreach ($candidates as $candidate) {
+        if ($normalize((string) $candidate) === $needle) return true;
+    }
+    if ($file === 'sakurazaka_news.json') {
+        return mb_strpos($normalize((string) ($value['title'] ?? '')), $needle, 0, 'UTF-8') !== false;
+    }
+    return false;
+}
+
+function api_skill_filtered_hits(string $path, string $file, string $label, array $plan, int $limit = 8): array
+{
+    $items = json_decode((string) @file_get_contents($path), true);
+    if (!is_array($items)) return array();
+    $hits = array();
+    foreach ($items as $key => $item) {
+        if (!is_array($item) || !api_skill_value_matches_filters($item, $plan['filters'] ?? array(), $file)) continue;
+        $hits[] = array(
+            'score' => 1000, 'sort_key' => api_skill_item_sort_key($item, $file), 'label' => $label, 'file' => $file,
+            'text' => (string) json_encode(array('key' => $key, 'value' => $item), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        );
+    }
+    if (($plan['sort'] ?? '') === 'latest') {
+        usort($hits, static fn(array $a, array $b): int => $b['sort_key'] <=> $a['sort_key']);
+    }
     return array_slice($hits, 0, $limit);
 }
 
@@ -375,7 +536,7 @@ function api_learning_context(string $query): string
 
 function api_skill_result(array $value, string $label): array
 {
-    $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? ($value['links'][0] ?? ''));
+    $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? $value['release_url'] ?? ($value['links'][0] ?? null) ?? ($value['youtube_urls'][0] ?? ''));
     $image = (string) ($value['thumb'] ?? $value['image'] ?? $value['image_url'] ?? '');
     if ($image === '' && isset($value['images'][0])) $image = (string) $value['images'][0];
     return array(
@@ -398,14 +559,24 @@ function api_skill_context_text(array $value, string $label): string
     $content = trim((string) ($value['content'] ?? $value['description'] ?? ''));
     $members = is_array($value['members'] ?? null) ? implode('、', array_map('strval', $value['members'])) : '';
     $episode = trim((string) ($value['episode'] ?? ''));
+    $profile = is_array($value['profile'] ?? null) ? $value['profile'] : array();
+    $releasedate = trim((string) ($value['releasedate'] ?? ''));
     if ($date !== '') $parts[] = '日付=' . $date;
     if ($time !== '') $parts[] = '時刻=' . $time;
     if ($category !== '') $parts[] = '分類=' . $category;
     if ($author !== '') $parts[] = 'メンバー=' . $author;
     if ($members !== '') $parts[] = '出演=' . $members;
     if ($episode !== '') $parts[] = '回=' . $episode;
+    if ($releasedate !== '') $parts[] = '発売日=' . $releasedate;
     if ($title !== '') $parts[] = '題名=' . lfm_substr($title, 0, 220);
     if ($content !== '') $parts[] = '概要=' . lfm_substr(preg_replace('/\s+/u', ' ', $content) ?? $content, 0, 320);
+    foreach ($profile as $key => $profileValue) {
+        $profileValue = trim((string) $profileValue);
+        if ($profileValue !== '') $parts[] = trim((string) $key) . '=' . lfm_substr($profileValue, 0, 120);
+    }
+    foreach (array('centers' => 'センター', 'writers' => '作曲', 'arrangers' => '編曲', 'directors' => '監督') as $field => $fieldLabel) {
+        if (is_array($value[$field] ?? null) && $value[$field]) $parts[] = $fieldLabel . '=' . implode('、', array_map('strval', array_slice($value[$field], 0, 8)));
+    }
     return $label . ': ' . implode(' | ', $parts);
 }
 
@@ -432,9 +603,12 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
             if (!empty($plan['sources']) && !in_array($file, $plan['sources'], true)) continue;
             $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest', 'sakumimi_latest'), true);
             $sourceLimit = count($plan['sources'] ?? array()) > 1 ? 3 : 10;
+            $hasExactFilter = trim((string) (($plan['filters']['member_name'] ?? ''))) !== '' || trim((string) (($plan['filters']['item_title'] ?? ''))) !== '';
             $sourceHits = $temporal
                 ? api_skill_temporal_hits($dataDir . '/' . $file, $file, $label, $plan, $sourceLimit)
-                : api_skill_search_source($dataDir . '/' . $file, $query, 7);
+                : ($hasExactFilter
+                    ? api_skill_filtered_hits($dataDir . '/' . $file, $file, $label, $plan, $sourceLimit)
+                    : api_skill_search_source($dataDir . '/' . $file, $query, 7));
             foreach ($sourceHits as $hit) {
                 $hit['label'] = $label;
                 $hit['file'] = $file;
@@ -448,17 +622,21 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
     $context = array();
     $results = array();
     $used = 0;
+    $seen = array();
     foreach ($hits as $hit) {
         $decoded = json_decode($hit['text'], true);
         $value = is_array($decoded) && isset($decoded['value']) && is_array($decoded['value']) ? $decoded['value'] : $decoded;
         if (!is_array($value)) continue;
+        $fingerprint = mb_strtolower(preg_replace('/[\s　]+/u', '', (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? $hit['text'])) ?? '', 'UTF-8');
+        if ($fingerprint !== '' && isset($seen[$fingerprint])) continue;
+        if ($fingerprint !== '') $seen[$fingerprint] = true;
         $piece = api_skill_context_text($value, $hit['label']);
         if ($used + lfm_strlen($piece) > 3600) continue;
         $context[] = $piece;
         $used += lfm_strlen($piece);
         $result = api_skill_result($value, $hit['label']);
         if ($result['url'] !== '' || $result['image'] !== '') $results[] = $result;
-        if (count($context) >= 6) break;
+        if (count($context) >= min(6, max(1, (int) ($plan['limit'] ?? 6)))) break;
     }
     return array(
         'skills' => $selected,

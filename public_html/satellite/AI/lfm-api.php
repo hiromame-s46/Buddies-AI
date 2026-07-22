@@ -227,6 +227,7 @@ if (is_file($skillRouterFile)) {
                 $sourceLimit = count($plan['sources'] ?? array()) > 1 ? 3 : 10;
                 foreach ($items as $key => $item) {
                     $value = is_array($item) ? $item : array('value' => $item);
+                    if (!api_fallback_value_matches_member($value, (string) (($plan['filters']['member_name'] ?? '')), $file)) continue;
                     $text = (string) json_encode(array('key' => $key, 'value' => $value), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
                     $normalized = mb_strtolower($text, 'UTF-8');
                     $score = 0;
@@ -251,6 +252,12 @@ if (is_file($skillRouterFile)) {
                 if ($fieldValue !== '') $fields[] = $fieldLabel . '=' . lfm_substr(preg_replace('/\s+/u', ' ', $fieldValue) ?? $fieldValue, 0, $field === 'content' ? 320 : 220);
             }
             if (is_array($value['members'] ?? null) && $value['members']) $fields[] = '出演=' . implode('、', array_map('strval', $value['members']));
+            if (is_array($value['profile'] ?? null)) {
+                foreach ($value['profile'] as $profileKey => $profileValue) {
+                    $profileValue = trim((string) $profileValue);
+                    if ($profileValue !== '') $fields[] = trim((string) $profileKey) . '=' . lfm_substr($profileValue, 0, 120);
+                }
+            }
             $piece = $hit['label'] . ': ' . implode(' | ', $fields);
             if ($used + lfm_strlen($piece) > 3600) continue;
             $context[] = $piece;
@@ -275,16 +282,51 @@ if (is_file($skillRouterFile)) {
 }
 
 if (!function_exists('api_skill_plan')) {
+    function api_fallback_member_target(string $query, string $dataDir): string
+    {
+        $compact = mb_strtolower(preg_replace('/[\s　]+/u', '', $query) ?? $query, 'UTF-8');
+        $matches = array();
+        foreach (array($dataDir . '/member.json', $dataDir . '/member_grad.json') as $path) {
+            $items = json_decode((string) @file_get_contents($path), true);
+            if (!is_array($items)) continue;
+            foreach ($items as $item) {
+                if (!is_array($item)) continue;
+                $canonical = trim((string) ($item['name'] ?? ''));
+                foreach (array($canonical, $item['kana'] ?? '', $item['name_kana'] ?? '') as $alias) {
+                    $alias = mb_strtolower(preg_replace('/[\s　]+/u', '', trim((string) $alias)) ?? '', 'UTF-8');
+                    if ($alias !== '' && mb_strpos($compact, $alias, 0, 'UTF-8') !== false) $matches[$alias] = $canonical;
+                }
+            }
+        }
+        if (!$matches) return '';
+        uksort($matches, static fn(string $a, string $b): int => mb_strlen($b, 'UTF-8') <=> mb_strlen($a, 'UTF-8'));
+        return (string) reset($matches);
+    }
+
+    function api_fallback_value_matches_member(array $value, string $target, string $file): bool
+    {
+        if ($target === '') return true;
+        $normalize = static fn(string $text): string => mb_strtolower(preg_replace('/[\s　]+/u', '', $text) ?? $text, 'UTF-8');
+        $needle = $normalize($target);
+        $candidates = array($value['name'] ?? '', $value['member'] ?? '', $value['author'] ?? '');
+        if (is_array($value['members'] ?? null)) $candidates = array_merge($candidates, $value['members']);
+        foreach ($candidates as $candidate) if ($normalize((string) $candidate) === $needle) return true;
+        return $file === 'sakurazaka_news.json' && mb_strpos($normalize((string) ($value['title'] ?? '')), $needle, 0, 'UTF-8') !== false;
+    }
+
     function api_skill_plan(string $query, ?string $dataDir = null): array
     {
+        $dataDir = $dataDir ?: dirname(__DIR__) . '/data';
         $today = new DateTimeImmutable('today', new DateTimeZone('Asia/Tokyo'));
-        $base = array('requires_skill' => false, 'skills' => array(), 'intent' => 'conversation', 'sources' => array(), 'sort' => 'relevance', 'date_filter' => '', 'description' => '', 'reference_date' => $today->format('Y-m-d'));
+        $memberTarget = api_fallback_member_target($query, $dataDir);
+        $base = array('requires_skill' => false, 'skills' => array(), 'intent' => 'conversation', 'sources' => array(), 'sort' => 'relevance', 'date_filter' => '', 'filters' => $memberTarget !== '' ? array('member_name' => $memberTarget) : array(), 'limit' => 6, 'description' => '', 'reference_date' => $today->format('Y-m-d'));
         if (preg_match('/今日(?:の)?(?:予定|スケジュール|出演)|本日(?:の)?(?:予定|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_today', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'today', 'description' => '今日のスケジュールを日付で絞り込み'));
         if (preg_match('/明日(?:の)?(?:予定|スケジュール|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_tomorrow', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'tomorrow', 'description' => '明日のスケジュールを日付で絞り込み'));
         if (preg_match('/予定|スケジュール|出演情報/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_upcoming', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'upcoming', 'description' => '今後のスケジュールを日付の近い順に検索'));
         if (preg_match('/さくみみ/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'sakumimi_latest', 'sources' => array('sakumimi_data.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'さくみみの配信情報を新しい順に検索'));
         if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)|櫻坂.*(?:最新|最近|近況|動向)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest', 'sources' => array('sakurazaka_news.json', 'blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => '公式ニュースとメンバーブログをそれぞれ新しい順に検索'));
-        if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest', 'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'ブログを投稿日が新しい順に並べて検索'));
+        if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest', 'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => ($memberTarget !== '' ? $memberTarget . 'の' : '') . 'ブログを投稿日が新しい順に並べて検索'));
+        if ($memberTarget !== '') return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-members'), 'intent' => 'member_profile', 'sources' => array('member.json', 'member_grad.json'), 'sort' => 'exact', 'limit' => 1, 'description' => $memberTarget . 'のメンバー情報だけを完全一致で検索'));
         if (preg_match('/櫻坂|欅坂|Buddies|BACKS|メンバー|楽曲|センター|ライブ|MV|誕生日|プロフィール/u', $query) && preg_match('/誰|何|いつ|どこ|教えて|調べ|検索|とは|\?/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-dictionary'), 'intent' => 'knowledge_search', 'description' => '関連する櫻坂46データを絞り込んで検索'));
         return $base;
     }
@@ -329,6 +371,9 @@ function api_build_prompt(array $input, int $maxChars): array
     $skill = $useSkills
         ? api_sakurazaka_skill($currentQuery, $requestedPlan)
         : array('skills' => array(), 'context' => '', 'results' => array());
+    if ($useSkills) {
+        $system .= "\nスキルは検索専用です。PHPで抽出済みの検索結果だけを自然な回答へ整形し、検索結果にない人物・日付・出来事を追加しないでください。";
+    }
     $learningContext = api_learning_context($currentQuery);
     $sections = array();
     if ($historyLines) $sections[] = "<REFERENCE_HISTORY>\n" . implode("\n", $historyLines) . "\n</REFERENCE_HISTORY>";
