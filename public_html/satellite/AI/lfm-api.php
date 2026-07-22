@@ -355,7 +355,7 @@ if (!$status['ready']) {
 }
 
 $contentLength = (int) ($_SERVER['CONTENT_LENGTH'] ?? 0);
-if ($contentLength > 65536) {
+if ($contentLength > 262144) {
     api_error('request too large', 413);
 }
 $raw = (string) file_get_contents('php://input');
@@ -364,19 +364,19 @@ if (!is_array($input)) {
     api_error('invalid JSON', 400);
 }
 
-$maxPromptChars = lfm_int($env['LFM_MAX_PROMPT_CHARS'] ?? 4000, 4000, 256, 20000);
+$maxPromptChars = lfm_int($env['LFM_MAX_PROMPT_CHARS'] ?? 20000, 20000, 256, 20000);
 $GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] = (string) ($env['LFM_SYSTEM_PROMPT'] ?? lfm_default_env()['LFM_SYSTEM_PROMPT']);
 list($systemPrompt, $prompt, $skills) = api_build_prompt($input, $maxPromptChars);
 $maxAllowedTokens = lfm_int($env['LFM_MAX_OUTPUT_TOKENS'] ?? 256, 256, 16, 1024);
-$maxTokens = lfm_int($input['max_tokens'] ?? min(192, $maxAllowedTokens), min(192, $maxAllowedTokens), 16, $maxAllowedTokens);
+$maxTokens = lfm_int($input['max_tokens'] ?? min(1024, $maxAllowedTokens), min(1024, $maxAllowedTokens), 16, $maxAllowedTokens);
 $temperature = lfm_float($input['temperature'] ?? 0.2, 0.2, 0.0, 1.5);
 $historyMessages = isset($input['messages']) && is_array($input['messages'])
     ? array_values($input['messages'])
     : array();
 $hasHistory = count($historyMessages) > 1;
-$threads = lfm_int($env['LFM_THREADS'] ?? 1, 1, 1, 8);
-$context = lfm_int($env['LFM_CONTEXT'] ?? 2048, 2048, 512, 8192);
-$timeout = lfm_int($env['LFM_TIMEOUT_SECONDS'] ?? 150, 150, 10, 300);
+$threads = lfm_int($env['LFM_THREADS'] ?? 2, 2, 1, 8);
+$context = lfm_int($env['LFM_CONTEXT'] ?? 8192, 8192, 512, 8192);
+$timeout = lfm_int($env['LFM_TIMEOUT_SECONDS'] ?? 300, 300, 10, 300);
 $binary = (string) ($env['LFM_BINARY_PATH'] ?? LFM_BINARY_PATH_DEFAULT);
 $model = (string) ($env['LFM_MODEL_PATH'] ?? LFM_MODEL_PATH_DEFAULT);
 $libraryPath = trim((string) ($env['LFM_LIBRARY_PATH'] ?? LFM_LIB_DIR));

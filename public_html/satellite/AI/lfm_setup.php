@@ -205,11 +205,11 @@ function setup_save_settings(): void
     $env['LFM_SYSTEM_PROMPT'] = trim((string) ($_POST['system_prompt'] ?? '')) ?: lfm_default_env()['LFM_SYSTEM_PROMPT'];
     $env['LFM_RATE_LIMIT_REQUESTS'] = (string) lfm_int($_POST['rate_requests'] ?? 6, 6, 1, 1000);
     $env['LFM_RATE_LIMIT_WINDOW'] = (string) lfm_int($_POST['rate_window'] ?? 600, 600, 10, 86400);
-    $env['LFM_MAX_PROMPT_CHARS'] = (string) lfm_int($_POST['max_prompt_chars'] ?? 4000, 4000, 256, 20000);
-    $env['LFM_MAX_OUTPUT_TOKENS'] = (string) lfm_int($_POST['max_output_tokens'] ?? 256, 256, 16, 1024);
-    $env['LFM_TIMEOUT_SECONDS'] = (string) lfm_int($_POST['timeout_seconds'] ?? 150, 150, 10, 300);
-    $env['LFM_THREADS'] = (string) lfm_int($_POST['threads'] ?? 1, 1, 1, 8);
-    $env['LFM_CONTEXT'] = (string) lfm_int($_POST['context'] ?? 2048, 2048, 512, 8192);
+    $env['LFM_MAX_PROMPT_CHARS'] = (string) lfm_int($_POST['max_prompt_chars'] ?? 20000, 20000, 256, 20000);
+    $env['LFM_MAX_OUTPUT_TOKENS'] = (string) lfm_int($_POST['max_output_tokens'] ?? 1024, 1024, 16, 1024);
+    $env['LFM_TIMEOUT_SECONDS'] = (string) lfm_int($_POST['timeout_seconds'] ?? 300, 300, 10, 300);
+    $env['LFM_THREADS'] = (string) lfm_int($_POST['threads'] ?? 2, 2, 1, 8);
+    $env['LFM_CONTEXT'] = (string) lfm_int($_POST['context'] ?? 8192, 8192, 512, 8192);
     lfm_write_env($env);
     setup_ok('設定を保存しました。', array('status' => setup_status()));
 }
