@@ -379,6 +379,9 @@ function api_build_prompt(array $input, int $maxChars): array
     if ($useSkills) {
         $system .= "\nスキルは検索専用です。PHPで抽出済みの検索結果だけを自然な回答へ整形し、検索結果にない人物・日付・出来事を追加しないでください。"
             . "\n回答に実際に採用した検索候補IDだけを<USE_RESULTS>R1,R2</USE_RESULTS>の形式で示し、その後に<FINAL>回答本文</FINAL>を出力してください。候補は1件でも複数でも構いません。";
+        if (($skill['plan']['intent'] ?? '') === 'blog_summary') {
+            $system .= "\nブログ要約では<BLOG_BODY>内の本文だけを根拠に、主要な話題、告知、本人の気持ちが分かる自然な日本語へ要約してください。本文の長い転載、文体の模倣、検索メタデータの出力はしないでください。";
+        }
     }
     $learningContext = api_learning_context($currentQuery);
     $sections = array();

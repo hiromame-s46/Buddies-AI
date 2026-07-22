@@ -103,6 +103,24 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
             'description' => '櫻坂46ニュースだけを新しい順に検索',
         ));
     }
+    $isBlogSummary = preg_match('/要約|まとめて|まとめる|要点|短く|内容(?:を)?教えて/u', $query) === 1
+        && (preg_match('/ブログ|記事/u', $query) === 1 || preg_match('~https://(?:www\.)?sakurazaka46\.com/s/s46/diary/detail/[0-9]+~u', $query) === 1 || $memberMatch);
+    if ($isBlogSummary) {
+        if (preg_match('~https://(?:www\.)?sakurazaka46\.com/s/s46/diary/detail/[0-9]+(?:\?[^\s　]*)?~u', $query, $urlMatch)) {
+            $plan['filters']['blog_url'] = rtrim($urlMatch[0], '。、,，)）]】');
+        }
+        $blogTitle = isset($plan['filters']['blog_url']) ? '' : api_skill_item_target($query, $dataDir, array('blogs.json'));
+        if ($blogTitle !== '') $plan['filters']['item_title'] = $blogTitle;
+        $hasTarget = isset($plan['filters']['blog_url']) || $memberMatch || $blogTitle !== '';
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_summary',
+            'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'limit' => 1,
+            'description' => $hasTarget
+                ? '指定されたブログを特定し、公式サイトから本文を取得して要約'
+                : '要約するブログのURL、記事タイトル、またはメンバー名を確認',
+            'needs_blog_target' => !$hasTarget,
+        ));
+    }
     if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) {
         return array_merge($plan, array(
             'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest',
@@ -608,6 +626,20 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
     if (!$selected) return array('skills' => array(), 'context' => '', 'results' => array());
     $experts = api_skill_experts();
     $hits = array();
+    $directBlogUrl = ($plan['intent'] ?? '') === 'blog_summary' ? trim((string) ($plan['filters']['blog_url'] ?? '')) : '';
+    if (($plan['intent'] ?? '') === 'blog_summary' && !empty($plan['needs_blog_target'])) {
+        return array(
+            'skills' => $selected,
+            'context' => '要約対象が特定できません。本文を推測せず、ブログのURL、記事タイトル、またはメンバー名を尋ねてください。',
+            'results' => array(), 'plan' => $plan,
+        );
+    }
+    if ($directBlogUrl !== '') {
+        $hits[] = array(
+            'score' => 1000, 'sort_key' => 0, 'label' => 'ブログ', 'file' => 'blogs.json',
+            'text' => (string) json_encode(array('value' => array('title' => '指定されたブログ', 'link' => $directBlogUrl)), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
+        );
+    }
     foreach ($selected as $expertId) {
         $expertSources = $experts[$expertId]['sources'];
         if (!empty($plan['sources'])) {
@@ -618,8 +650,9 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
             $expertSources = $orderedSources;
         }
         foreach ($expertSources as $file => $label) {
+            if ($directBlogUrl !== '') continue;
             if (!empty($plan['sources']) && !in_array($file, $plan['sources'], true)) continue;
-            $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest', 'sakumimi_latest', 'activity_latest'), true);
+            $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest', 'blog_summary', 'sakumimi_latest', 'activity_latest'), true);
             $sourceCount = count($plan['sources'] ?? array());
             $sourceLimit = $sourceCount > 2 ? 1 : ($sourceCount > 1 ? 3 : 10);
             $hasExactFilter = trim((string) (($plan['filters']['member_name'] ?? ''))) !== '' || trim((string) (($plan['filters']['item_title'] ?? ''))) !== '';
@@ -642,10 +675,12 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
     $results = array();
     $used = 0;
     $seen = array();
+    $summaryTarget = null;
     foreach ($hits as $hit) {
         $decoded = json_decode($hit['text'], true);
         $value = is_array($decoded) && isset($decoded['value']) && is_array($decoded['value']) ? $decoded['value'] : $decoded;
         if (!is_array($value)) continue;
+        if (($plan['intent'] ?? '') === 'blog_summary' && $summaryTarget === null) $summaryTarget = $value;
         $fingerprint = mb_strtolower(preg_replace('/[\s　]+/u', '', (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? $hit['text'])) ?? '', 'UTF-8');
         if ($fingerprint !== '' && isset($seen[$fingerprint])) continue;
         if ($fingerprint !== '') $seen[$fingerprint] = true;
@@ -660,6 +695,27 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
             $results[] = $result;
         }
         if (count($context) >= min(6, max(1, (int) ($plan['limit'] ?? 6)))) break;
+    }
+    if (($plan['intent'] ?? '') === 'blog_summary') {
+        if (!is_array($summaryTarget)) {
+            $context = array('対象ブログがデータ内に見つかりません。別の記事を推測せず、URLまたは正確な記事タイトルを尋ねてください。');
+            $results = array();
+        } else {
+            $blogUrl = trim((string) ($summaryTarget['link'] ?? $summaryTarget['url'] ?? ''));
+            if ($blogUrl !== '' && str_starts_with($blogUrl, '/')) $blogUrl = 'https://sakurazaka46.com' . $blogUrl;
+            try {
+                $article = lfm_fetch_sakurazaka_blog($blogUrl, 12000);
+                $metadata = api_skill_context_text($summaryTarget, 'ブログ');
+                $context = array(
+                    '[R1] ' . $metadata,
+                    "要約対象本文（この本文だけを根拠にする）:\n<BLOG_BODY>\n" . $article['body'] . "\n</BLOG_BODY>",
+                );
+                $results = array_slice($results, 0, 1);
+            } catch (Throwable $error) {
+                error_log('Buddies AI blog fetch: ' . $error->getMessage());
+                $context = array('対象ブログは特定できましたが、公式サイトから本文を取得できませんでした。本文を推測せず、取得失敗を簡潔に伝えてください。');
+            }
+        }
     }
     return array(
         'skills' => $selected,

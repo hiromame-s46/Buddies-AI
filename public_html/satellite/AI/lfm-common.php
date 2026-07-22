@@ -264,6 +264,92 @@ function lfm_substr(string $value, int $start, ?int $length = null): string
     return (string) substr($value, $start, $length);
 }
 
+/**
+ * Fetch an official Sakurazaka46 blog and return only its article body.
+ * The HTML is never persisted. Keeping this here lets chat and Learning use
+ * one allow-listed parser instead of exposing a general-purpose URL fetcher.
+ */
+function lfm_fetch_sakurazaka_blog(string $url, int $maxBodyChars = 14000): array
+{
+    $url = html_entity_decode(trim($url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $parts = parse_url($url);
+    $host = strtolower((string) ($parts['host'] ?? ''));
+    $path = (string) ($parts['path'] ?? '');
+    if (($parts['scheme'] ?? '') !== 'https' || !in_array($host, array('sakurazaka46.com', 'www.sakurazaka46.com'), true)
+        || preg_match('~^/s/s46/diary/detail/[0-9]+$~', $path) !== 1) {
+        throw new InvalidArgumentException('櫻坂46公式ブログの記事URLを指定してください。');
+    }
+
+    $html = '';
+    $maximumBytes = 2 * 1024 * 1024;
+    if (lfm_function_available('curl_init')) {
+        $handle = curl_init($url);
+        if ($handle === false) throw new RuntimeException('ブログへ接続できませんでした。');
+        curl_setopt_array($handle, array(
+            CURLOPT_RETURNTRANSFER => false,
+            CURLOPT_FOLLOWLOCATION => false,
+            CURLOPT_CONNECTTIMEOUT => 5,
+            CURLOPT_TIMEOUT => 15,
+            CURLOPT_USERAGENT => 'BuddiesAI/4.0 (+https://sakurazaka46.com/)',
+            CURLOPT_HTTPHEADER => array('Accept: text/html,application/xhtml+xml', 'Accept-Language: ja'),
+            CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (&$html, $maximumBytes): int {
+                if (strlen($html) + strlen($chunk) > $maximumBytes) return 0;
+                $html .= $chunk;
+                return strlen($chunk);
+            },
+        ));
+        if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) curl_setopt($handle, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS);
+        $ok = curl_exec($handle);
+        $status = (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE);
+        $error = curl_error($handle);
+        unset($handle);
+        if ($ok === false || $status !== 200 || $html === '') {
+            throw new RuntimeException($error !== '' ? 'ブログ本文を取得できませんでした。' : 'ブログが見つかりませんでした。');
+        }
+    } else {
+        $context = stream_context_create(array('http' => array(
+            'method' => 'GET', 'timeout' => 15, 'follow_location' => 0, 'ignore_errors' => true,
+            'header' => "User-Agent: BuddiesAI/4.0\r\nAccept: text/html,application/xhtml+xml\r\nAccept-Language: ja\r\n",
+        )));
+        $html = (string) @file_get_contents($url, false, $context, 0, $maximumBytes);
+        if ($html === '' || !preg_match('~^HTTP/\S+\s+200\b~', (string) (($http_response_header ?? array())[0] ?? ''))) {
+            throw new RuntimeException('ブログ本文を取得できませんでした。');
+        }
+    }
+
+    $previous = libxml_use_internal_errors(true);
+    $document = new DOMDocument();
+    $loaded = @$document->loadHTML('<?xml encoding="UTF-8">' . $html, LIBXML_NONET | LIBXML_NOERROR | LIBXML_NOWARNING);
+    libxml_clear_errors();
+    libxml_use_internal_errors($previous);
+    if (!$loaded) throw new RuntimeException('ブログ本文を解析できませんでした。');
+    $xpath = new DOMXPath($document);
+    $nodes = $xpath->query("//*[contains(concat(' ', normalize-space(@class), ' '), ' box-article ')]");
+    $article = $nodes instanceof DOMNodeList ? $nodes->item(0) : null;
+    if (!$article) throw new RuntimeException('ブログ本文が見つかりませんでした。');
+
+    foreach (iterator_to_array($xpath->query('.//script|.//style|.//noscript|.//svg|.//picture|.//img', $article) ?: array()) as $node) {
+        if ($node->parentNode) $node->parentNode->removeChild($node);
+    }
+    foreach (iterator_to_array($xpath->query('.//br', $article) ?: array()) as $break) {
+        if ($break->parentNode) $break->parentNode->replaceChild($document->createTextNode("\n"), $break);
+    }
+    $body = html_entity_decode((string) $article->textContent, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    $body = preg_replace('/[\t ]+/u', ' ', $body) ?? $body;
+    $body = preg_replace('/ *\n */u', "\n", $body) ?? $body;
+    $body = trim(preg_replace('/\n{3,}/u', "\n\n", $body) ?? $body);
+    if (lfm_strlen($body) < 20) throw new RuntimeException('ブログ本文が空です。');
+
+    $titleNode = $xpath->query('//article//*[self::h1 or self::h2][1]')->item(0)
+        ?: $xpath->query('//meta[@property="og:title"]')->item(0);
+    $title = $titleNode instanceof DOMElement && $titleNode->hasAttribute('content')
+        ? $titleNode->getAttribute('content') : ($titleNode ? trim((string) $titleNode->textContent) : '');
+    $ogTitle = $xpath->query('//meta[@property="og:title"]')->item(0);
+    $ogTitleText = $ogTitle instanceof DOMElement ? trim($ogTitle->getAttribute('content')) : '';
+    $author = preg_match('/^(.+?)\s*公式ブログ/u', $ogTitleText, $authorMatch) ? trim($authorMatch[1]) : '';
+    return array('url' => $url, 'title' => $title, 'author' => $author, 'body' => lfm_substr($body, 0, max(1000, $maxBodyChars)));
+}
+
 function lfm_human_bytes(float $bytes): string
 {
     $units = array('B', 'KB', 'MB', 'GB', 'TB');
