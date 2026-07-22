@@ -141,6 +141,8 @@ function lfm_default_env(): array
         'LFM_API_KEY' => bin2hex(random_bytes(32)),
         'LFM_PUBLIC_CHAT' => 'true',
         'LFM_ALLOWED_ORIGIN' => '',
+        'LFM_API_DIRECTORY' => 'lfm-api.php',
+        'LFM_SYSTEM_PROMPT' => 'あなたは日本語で簡潔かつ正確に回答するアシスタントです。分からない内容は推測で断定しないでください。',
         'LFM_RATE_LIMIT_REQUESTS' => '6',
         'LFM_RATE_LIMIT_WINDOW' => '600',
         'LFM_MAX_PROMPT_CHARS' => '4000',

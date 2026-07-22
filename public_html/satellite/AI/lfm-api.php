@@ -126,9 +126,86 @@ function api_runtime_status(array $env): array
     );
 }
 
+/**
+ * AI skills for the SakuLabo knowledge base. Keep this allow-list explicit:
+ * account/auth/admin data must never become prompt context.
+ */
+function api_sakurazaka_skill(string $query): array
+{
+    $dataDir = dirname(__DIR__) . '/data';
+    $sources = array(
+        'sakurazaka_terms.json' => '櫻坂用語辞書',
+        'member.json' => 'メンバー', 'member_grad.json' => '卒業メンバー',
+        'sakamichi_sakura_songs.json' => '楽曲', 'sakurazaka46_songs.json' => '楽曲',
+        'sakamichi_sakura_mvs.json' => 'MV', 'sakamichi_sakura_lives.json' => 'ライブ',
+        'sakamichi_sakura_setlists.json' => 'セットリスト',
+        'sakamichi_sakura_formations.json' => 'フォーメーション',
+        'sakurazaka46_no_sa.json' => '櫻坂のさ', 'sakumimi_data.json' => 'さくみみ',
+        'blogs.json' => 'ブログ', 'sakurazaka_news.json' => 'ニュース',
+        'schedule.json' => 'スケジュール', 'cyalume.json' => 'ペンライトカラー',
+    );
+    $q = trim($query);
+    $normalized = mb_strtolower($q, 'UTF-8');
+    $terms = array_values(array_filter(preg_split('/[\s　、,。！？!?「」『』()（）]+/u', $normalized) ?: array(), static function (string $v): bool {
+        return mb_strlen($v, 'UTF-8') >= 2;
+    }));
+    // First decide the skill combination from the user's intent, then search only relevant data.
+    $planned = array();
+    if (preg_match('/メンバー|加入|卒業|現役|誕生日|身長|出身|プロフィール|誰/u', $q)) $planned['sakurazaka-members'] = true;
+    if (preg_match('/曲|楽曲|歌|センター|歌詞|作曲|作詞|編曲|MV|シングル|アルバム|リリース/u', $q)) $planned['sakurazaka-music'] = true;
+    if (preg_match('/ライブ|公演|セトリ|セットリスト|フォーメーション|ポジション|櫻坂のさ|さくみみ|ブログ|ニュース|予定|出演/u', $q)) $planned['sakurazaka-archive'] = true;
+    if (preg_match('/用語|意味|何|とは|ファン|Buddies|欅坂|櫻坂|BACKS|三期生|二期生|一期生/u', $q)) $planned['sakurazaka-dictionary'] = true;
+    $sakurazaka = preg_match('/櫻坂|欅坂|サク|さくみみ|Buddies|メンバー|楽曲|曲|ライブ|フォーメーション|センター|ブログ|MV|卒業|シングル|アルバム|出演|誕生日|身長|出身/u', $q) === 1;
+    if (!$sakurazaka && count($terms) === 0) {
+        return array('skills' => array(), 'context' => '');
+    }
+
+    static $cache = array();
+    $hits = array();
+    foreach ($sources as $file => $label) {
+        $path = $dataDir . '/' . $file;
+        if (!is_file($path)) continue;
+        $mtime = (int) @filemtime($path);
+        if (!isset($cache[$file]) || $cache[$file]['mtime'] !== $mtime) {
+            $decoded = json_decode((string) @file_get_contents($path), true);
+            $cache[$file] = array('mtime' => $mtime, 'data' => is_array($decoded) ? $decoded : array());
+        }
+        $items = $cache[$file]['data'];
+        $allowedForPlan = $planned;
+        if ($file === 'sakurazaka_terms.json' && !isset($allowedForPlan['sakurazaka-dictionary'])) continue;
+        if (in_array($label, array('メンバー', '卒業メンバー'), true) && $allowedForPlan && !isset($allowedForPlan['sakurazaka-members'])) continue;
+        if (in_array($label, array('楽曲', 'MV', 'ペンライトカラー'), true) && $allowedForPlan && !isset($allowedForPlan['sakurazaka-music'])) continue;
+        if (in_array($label, array('ライブ', 'セットリスト', 'フォーメーション', '櫻坂のさ', 'さくみみ', 'ブログ', 'ニュース', 'スケジュール'), true) && $allowedForPlan && !isset($allowedForPlan['sakurazaka-archive'])) continue;
+        foreach ($items as $key => $item) {
+            $text = is_string($item) ? $item : json_encode(array('key' => $key, 'value' => $item), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+            $text = (string) $text;
+            $score = 0;
+            foreach ($terms as $term) $score += substr_count(mb_strtolower($text, 'UTF-8'), $term) * 2;
+            if ($sakurazaka && $score === 0) {
+                if (in_array($label, array('メンバー', '楽曲', 'ライブ', 'ブログ', 'さくみみ', 'ニュース'), true)) $score = 1;
+            }
+            if ($score > 0) $hits[] = array('score' => $score, 'label' => $label, 'file' => $file, 'text' => $text);
+        }
+    }
+    usort($hits, static function (array $a, array $b): int { return $b['score'] <=> $a['score']; });
+    $context = array(); $used = 0; $skillSet = array();
+    foreach ($hits as $hit) {
+        $piece = '[' . $hit['label'] . ' / ' . $hit['file'] . '] ' . lfm_substr($hit['text'], 0, 700);
+        if ($used + lfm_strlen($piece) > 2200) continue;
+        $context[] = $piece; $used += lfm_strlen($piece);
+        if (in_array($hit['label'], array('メンバー', '卒業メンバー'), true)) $skillSet['sakurazaka-members'] = true;
+        if (in_array($hit['label'], array('楽曲', 'MV', 'ペンライトカラー'), true)) $skillSet['sakurazaka-music'] = true;
+        if (in_array($hit['label'], array('ライブ', 'セットリスト', 'フォーメーション', '櫻坂のさ', 'さくみみ', 'ブログ', 'ニュース', 'スケジュール'), true)) $skillSet['sakurazaka-archive'] = true;
+        if (count($context) >= 4) break;
+    }
+    $skills = array_keys($planned ?: $skillSet);
+    if ($context && !$skills) $skills = array('sakurazaka-knowledge');
+    return array('skills' => $skills, 'context' => $context ? "\n\n【スキル参照情報】\n" . implode("\n", $context) : '');
+}
+
 function api_build_prompt(array $input, int $maxChars): array
 {
-    $system = trim((string) ($input['system'] ?? 'あなたは日本語で簡潔かつ正確に回答するアシスタントです。'));
+    $system = trim((string) ($GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] ?? 'あなたは日本語で簡潔かつ正確に回答するアシスタントです。'));
     $prompt = trim((string) ($input['prompt'] ?? ''));
 
     if ($prompt === '' && isset($input['messages']) && is_array($input['messages'])) {
@@ -160,7 +237,9 @@ function api_build_prompt(array $input, int $maxChars): array
         api_error('prompt must be shorter', 422, array('max_chars' => $maxChars));
     }
     $system = lfm_substr($system, 0, 1200);
-    return array($system, $prompt);
+    $skill = api_sakurazaka_skill($prompt);
+    if ($skill['context'] !== '') $prompt = $skill['context'] . "\n\n【ユーザーの質問】\n" . $prompt;
+    return array($system, $prompt, $skill['skills']);
 }
 
 function api_clean_output(string $text, string $prompt = ''): string
@@ -286,7 +365,8 @@ if (!is_array($input)) {
 }
 
 $maxPromptChars = lfm_int($env['LFM_MAX_PROMPT_CHARS'] ?? 4000, 4000, 256, 20000);
-list($systemPrompt, $prompt) = api_build_prompt($input, $maxPromptChars);
+$GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] = (string) ($env['LFM_SYSTEM_PROMPT'] ?? lfm_default_env()['LFM_SYSTEM_PROMPT']);
+list($systemPrompt, $prompt, $skills) = api_build_prompt($input, $maxPromptChars);
 $maxAllowedTokens = lfm_int($env['LFM_MAX_OUTPUT_TOKENS'] ?? 256, 256, 16, 1024);
 $maxTokens = lfm_int($input['max_tokens'] ?? min(192, $maxAllowedTokens), min(192, $maxAllowedTokens), 16, $maxAllowedTokens);
 $temperature = lfm_float($input['temperature'] ?? 0.2, 0.2, 0.0, 1.5);
@@ -334,7 +414,6 @@ $argv = array(
     '--simple-io',
     '--no-display-prompt',
     '--no-warmup',
-    '--no-show-timings',
     '--log-disable',
 );
 
@@ -375,10 +454,14 @@ if ($text === '') {
     $details = trim((string) $result['stderr']);
     api_error('empty generation result', 500, array('details' => lfm_substr($details, 0, 1600)));
 }
+if (!empty($skills)) {
+    $text = '【スキル読み込み: ' . implode('、', $skills) . "】\n\n" . $text;
+}
 
 lfm_json_response(array(
     'ok' => true,
     'text' => $text,
+    'skills' => $skills,
     'model' => LFM_MODEL_REPO . ':Q4_K_M',
     'usage' => array('max_output_tokens' => $maxTokens),
     'elapsed_seconds' => $elapsed,

@@ -148,6 +148,8 @@ function setup_status(): array
         'setup_key_masked' => setup_mask((string) ($env['LFM_SETUP_KEY'] ?? '')),
         'api_key_masked' => setup_mask((string) ($env['LFM_API_KEY'] ?? '')),
         'public_chat' => lfm_bool($env['LFM_PUBLIC_CHAT'] ?? 'true', true),
+        'api_directory' => (string) ($env['LFM_API_DIRECTORY'] ?? 'lfm-api.php'),
+        'system_prompt' => (string) ($env['LFM_SYSTEM_PROMPT'] ?? ''),
         'rate_limit' => array(
             'requests' => lfm_int($env['LFM_RATE_LIMIT_REQUESTS'] ?? 6, 6, 1, 1000),
             'window' => lfm_int($env['LFM_RATE_LIMIT_WINDOW'] ?? 600, 600, 10, 86400),
@@ -199,6 +201,8 @@ function setup_save_settings(): void
     $env = lfm_load_env(true);
     $env['LFM_PUBLIC_CHAT'] = isset($_POST['public_chat']) && $_POST['public_chat'] === 'true' ? 'true' : 'false';
     $env['LFM_ALLOWED_ORIGIN'] = trim((string) ($_POST['allowed_origin'] ?? ''));
+    $env['LFM_API_DIRECTORY'] = trim((string) ($_POST['api_directory'] ?? 'lfm-api.php')) ?: 'lfm-api.php';
+    $env['LFM_SYSTEM_PROMPT'] = trim((string) ($_POST['system_prompt'] ?? '')) ?: lfm_default_env()['LFM_SYSTEM_PROMPT'];
     $env['LFM_RATE_LIMIT_REQUESTS'] = (string) lfm_int($_POST['rate_requests'] ?? 6, 6, 1, 1000);
     $env['LFM_RATE_LIMIT_WINDOW'] = (string) lfm_int($_POST['rate_window'] ?? 600, 600, 10, 86400);
     $env['LFM_MAX_PROMPT_CHARS'] = (string) lfm_int($_POST['max_prompt_chars'] ?? 4000, 4000, 256, 20000);
@@ -643,12 +647,40 @@ function setup_test_inference(): void
     $system = LFM_TMP_DIR . '/setup-test-system.txt';
     file_put_contents($prompt, '「動作確認成功」とだけ日本語で答えてください。', LOCK_EX);
     file_put_contents($system, '指示に簡潔に従ってください。', LOCK_EX);
-    $argv = array($binary, '-m', $model, '-f', $prompt, '-sysf', $system, '-cnv', '-st', '-n', '24', '-c', '512', '-t', '1', '--temp', '0.1', '--simple-io', '--no-display-prompt', '--no-warmup', '--no-show-timings', '--log-disable');
+    $argv = array($binary, '-m', $model, '-f', $prompt, '-sysf', $system, '-cnv', '-st', '-n', '24', '-c', '512', '-t', '1', '--temp', '0.1', '--simple-io', '--no-display-prompt', '--no-warmup', '--log-disable');
     $runEnv = array('LD_LIBRARY_PATH' => (string) ($env['LFM_LIBRARY_PATH'] ?? LFM_LIB_DIR));
     $result = lfm_run_command($argv, min(120, lfm_int($env['LFM_TIMEOUT_SECONDS'] ?? 150, 150, 10, 300)), $runEnv, LFM_RUNTIME_DIR);
     @unlink($prompt);
     @unlink($system);
     setup_ok($result['ok'] ? '推論テストが完了しました。' : '推論テストに失敗しました。', array('result' => $result));
+}
+
+function setup_generate_dictionary(): void
+{
+    $env = lfm_load_env(false);
+    $binary = (string) ($env['LFM_BINARY_PATH'] ?? LFM_BINARY_PATH_DEFAULT);
+    $model = (string) ($env['LFM_MODEL_PATH'] ?? LFM_MODEL_PATH_DEFAULT);
+    if (!is_file($binary) || !is_file($model)) setup_fail('モデルまたはllama-cliがありません。', 404);
+    $topic = trim((string) ($_POST['topic'] ?? '櫻坂46の用語'));
+    $promptFile = LFM_TMP_DIR . '/' . lfm_random_filename('dict-prompt', '.txt');
+    $systemFile = LFM_TMP_DIR . '/' . lfm_random_filename('dict-system', '.txt');
+    file_put_contents($promptFile, "櫻坂46に関する『{$topic}』の用語を10件作成してください。JSON配列だけを出力し、各要素はterm, definition, category, aliasesを持たせてください。事実に自信がない項目は作らないでください。", LOCK_EX);
+    file_put_contents($systemFile, (string) ($env['LFM_SYSTEM_PROMPT'] ?? '日本語で正確に回答してください。'), LOCK_EX);
+    $argv = array($binary, '-m', $model, '-f', $promptFile, '-sysf', $systemFile, '-n', '768', '-c', '2048', '-t', '1', '--temp', '0.2', '--simple-io', '--no-display-prompt', '--no-warmup', '--log-disable');
+    $result = lfm_run_command($argv, 150, array('LD_LIBRARY_PATH' => (string) ($env['LFM_LIBRARY_PATH'] ?? LFM_LIB_DIR)), LFM_RUNTIME_DIR);
+    @unlink($promptFile); @unlink($systemFile);
+    if (!$result['ok']) setup_fail('辞書生成に失敗しました。', 500, array('details' => lfm_substr((string) $result['stderr'], 0, 1200)));
+    $raw = trim((string) $result['stdout']);
+    $start = strpos($raw, '['); $end = strrpos($raw, ']');
+    $items = ($start !== false && $end !== false) ? json_decode(substr($raw, $start, $end - $start + 1), true) : null;
+    if (!is_array($items)) setup_fail('AIの出力からJSON辞書を抽出できませんでした。', 422, array('raw' => lfm_substr($raw, 0, 2000)));
+    $path = __DIR__ . '/sakurazaka_terms.json';
+    $current = is_file($path) ? json_decode((string) file_get_contents($path), true) : array();
+    $current = is_array($current) ? $current : array();
+    $known = array(); foreach ($current as $item) if (is_array($item) && isset($item['term'])) $known[(string) $item['term']] = true;
+    foreach ($items as $item) if (is_array($item) && trim((string) ($item['term'] ?? '')) !== '' && !isset($known[(string) $item['term']])) $current[] = array('term' => trim((string) $item['term']), 'definition' => trim((string) ($item['definition'] ?? '')), 'category' => trim((string) ($item['category'] ?? '用語')), 'aliases' => is_array($item['aliases'] ?? null) ? array_values($item['aliases']) : array());
+    file_put_contents($path, json_encode(array_values($current), JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT) . "\n", LOCK_EX);
+    setup_ok('AI生成の辞書候補を登録しました。', array('added' => count($current) - count($known), 'total' => count($current), 'items' => $items));
 }
 
 function setup_start_source_build(): void
@@ -703,8 +735,8 @@ function setup_start_source_build(): void
         'rm -rf ' . escapeshellarg($buildRoot) . "\n" .
         escapeshellarg(lfm_command_path_raw('cmake')) . ' -S ' . escapeshellarg($sourceRoot) . ' -B ' . escapeshellarg($buildRoot) . ' ' .
         '-DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_STATIC=ON -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DGGML_BLAS=OFF -DGGML_BACKEND_DL=OFF -DGGML_CCACHE=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=ON' . "\n" .
-        escapeshellarg(lfm_command_path_raw('cmake')) . ' --build ' . escapeshellarg($buildRoot) . ' --config Release --target llama-cli -j1' . "\n" .
-        'cp ' . escapeshellarg($buildRoot . '/bin/llama-cli') . ' ' . escapeshellarg(LFM_BINARY_PATH_DEFAULT) . "\n" .
+        escapeshellarg(lfm_command_path_raw('cmake')) . ' --build ' . escapeshellarg($buildRoot) . ' --config Release --target llama-completion -j1' . "\n" .
+        'cp ' . escapeshellarg($buildRoot . '/bin/llama-completion') . ' ' . escapeshellarg(LFM_BINARY_PATH_DEFAULT) . "\n" .
         'chmod 750 ' . escapeshellarg(LFM_BINARY_PATH_DEFAULT) . "\n" .
         'touch ' . escapeshellarg($done) . "\n";
     file_put_contents($script, $scriptText, LOCK_EX);
@@ -746,6 +778,7 @@ if ($action !== '') {
             case 'upload_bundle': setup_upload_bundle(); break;
             case 'test_binary': setup_test_binary(); break;
             case 'test_inference': setup_test_inference(); break;
+            case 'generate_dictionary': setup_generate_dictionary(); break;
             case 'start_source_build': setup_start_source_build(); break;
             case 'build_status': setup_build_status(); break;
             default: setup_fail('不明な操作です。', 404);
@@ -793,12 +826,14 @@ async function request(action,form=null){const url=`${endpoint}?key=${encodeURIC
 function badge(ok){return `<span class="pill ${ok?'ok':'bad'}">${ok?'OK':'NG'}</span>`}
 function esc(value){return String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 function renderStatus(s){const rows=[['パッケージ',`${esc(s.version)} / ${esc(s.build_id)}`],['実行ファイル',esc(s.executing_file)],['SHA-256',esc(s.file_sha256)],['設置ディレクトリ',esc(s.base_dir)],['インストールディレクトリ',esc(s.runtime_dir)],['.env',`${badge(s.env_exists)} ${esc(s.env_file)}`],['llama-cli',`${badge(s.binary_installed)} ${esc(s.binary_path)} (${esc(s.binary_size)})`],['モデル',`${badge(s.model_installed)} ${esc(s.model_path)} (${esc(s.model_size)})`],['公開チャット',badge(s.public_chat)],['PHP実行方式',esc(s.process_backend)],['PHP / CPU',`${esc(s.php)} / ${esc(s.architecture)}`],['空き容量',esc(s.free_space)],['ランタイム容量',esc(s.runtime_size)],['APIキー',esc(s.api_key_masked)],['セットアップキー',esc(s.setup_key_masked)]];$('statusRows').innerHTML=rows.map(([a,b])=>`<div class="row"><div class="label">${a}</div><div class="value">${b}</div></div>`).join('');if(s.binary_version)show(`llama-cli:\n${s.binary_version}\n\n依存関係:\n${s.dependency_report||'lddなし'}`);const f=$('settingsForm');f.public_chat.value=s.public_chat?'true':'false';f.rate_requests.value=s.rate_limit.requests;f.rate_window.value=s.rate_limit.window;updateModelProgress(s.model_partial_size||0,s.model_installed?(s.model_partial_size||1):0,s.model_installed)}
-async function refresh(){try{const data=await request('status');renderStatus(data.status)}catch(e){show(e.message);toast('状態取得に失敗しました')}}
+async function refresh(){try{const data=await request('status');renderStatus(data.status);$('settingsForm').api_directory.value=data.status.api_directory||'lfm-api.php';$('settingsForm').system_prompt.value=data.status.system_prompt||''}catch(e){show(e.message);toast('状態取得に失敗しました')}}
 async function act(action,form=null){if(busy)return;busy=true;try{show(`${action} を実行中…`);const data=await request(action,form);show(data);toast(data.message||'完了');if(data.status)renderStatus(data.status);else await refresh()}catch(e){show(e.stack||e.message);toast('エラーが発生しました')}finally{busy=false}}
 document.querySelectorAll('[data-action]').forEach(b=>b.addEventListener('click',()=>act(b.dataset.action)));
 document.querySelectorAll('[data-confirm-action]').forEach(b=>b.addEventListener('click',()=>{const word=b.dataset.confirm;const typed=prompt(`実行するには「${word}」と入力してください。`);if(typed!==word)return;const f=new FormData();f.set('confirm',typed);act(b.dataset.confirmAction,f)}));
 $('refresh').addEventListener('click',refresh);
 $('bundleForm').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.currentTarget);act('upload_bundle',f)});
+(()=>{const f=$('settingsForm'),grid=f.querySelector('.settings-grid');const extra=document.createElement('div');extra.className='field';extra.innerHTML='<label>APIディレクトリ</label><input name="api_directory" value="lfm-api.php" autocomplete="off"><label>システムプロンプト</label><textarea name="system_prompt" rows="5" style="width:100%;padding:10px 11px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--text)"></textarea>';grid.prepend(extra);})();
+(()=>{const f=document.createElement('section');f.className='card wide';f.innerHTML='<h2>AI辞書管理</h2><p class="note">櫻坂関連のテーマを指定すると、AIがJSON形式の用語候補を作成し、重複を除いて辞書へ追加します。保存前に操作結果を確認してください。</p><div class="field"><label>生成テーマ</label><input id="dictionaryTopic" value="櫻坂46の基本用語・活動・楽曲・ファン用語"></div><div class="actions"><button type="button" id="generateDictionary">AIで用語候補を生成して登録</button></div>';document.querySelector('.grid').insertBefore(f,document.querySelector('.grid').lastElementChild);$('generateDictionary').onclick=()=>{const form=new FormData();form.set('topic',$('dictionaryTopic').value);act('generate_dictionary',form)};})();
 $('settingsForm').addEventListener('submit',e=>{e.preventDefault();const f=new FormData(e.currentTarget);f.set('public_chat',e.currentTarget.public_chat.value);act('save_settings',f)});
 $('regenerateKeys').addEventListener('click',async()=>{const typed=prompt('実行するには「REGENERATE」と入力してください。');if(typed!=='REGENERATE')return;const f=new FormData();f.set('confirm',typed);try{const d=await request('regenerate_keys',f);show(`新しいセットアップキー:\n${d.setup_key}\n\n新しい外部APIキー:\n${d.api_key}\n\nこの画面を閉じる前に保存してください。`);toast('キーを再生成しました')}catch(e){show(e.message)}});
 function updateModelProgress(done,total,installed=false){let pct=installed?100:(total?Math.min(100,done/total*100):0);$('modelBar').style.width=pct+'%';$('modelProgress').textContent=installed?'インストール済み':`${(done/1024/1024).toFixed(1)} MB / ${total?(total/1024/1024).toFixed(1)+' MB':'容量取得中'}`}
