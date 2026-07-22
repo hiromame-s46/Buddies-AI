@@ -78,4 +78,10 @@ const imageButton=$('imageButton');if(imageButton)imageButton.innerHTML='<svg vi
 const sourceButton=$('sakulaboButton');if(sourceButton)sourceButton.innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 4.5A2.5 2.5 0 0 1 7.5 2H19v17H7.5A2.5 2.5 0 0 0 5 21.5z"/><path d="M5 4.5v17M9 6h6M9 10h6"/></svg>';
 const originalSend=send;send=async text=>{const needsSkill=/最新|ニュース|検索|調べ|ブログ|記事|予定|楽曲|メンバー|画像|判定|ASTRA|比較|根拠|出典/.test(text);if(needsSkill)chatStatus('busy','（関連情報を検索中…）');return originalSend(text)};
 const safeHealth=health;health=async()=>{const timer=setTimeout(()=>status('','チャット利用可能'),2500);try{const r=await fetch((settings.apiUrl||'lfm-api.php')+'?action=health&v='+Date.now(),{cache:'no-store'});const d=await r.json();clearTimeout(timer);status(d.ok&&d.status?.ready?'ok':'','チャット利用可能')}catch{clearTimeout(timer);status('','チャット利用可能')}};health();
-<style>#sakulaboButton,#sakulaboBackdrop{display:none!important}.mark{border:0!important;outline:0!important;box-shadow:none!important}</style></script></body></html>
+<style>
+button,.icon,.send,.stop,.starter,.close,.btn{border:0!important;outline:0!important;box-shadow:none!important}
+.composer-row{align-items:stretch}.composer-row>.icon,.composer{height:54px}.composer{min-height:54px}.composer-row>.icon{display:grid;place-items:center;align-self:stretch}
+.mark{border:0!important;outline:0!important;box-shadow:none!important}
+@media(max-width:620px){.composer-row>.icon,.composer{height:48px;min-height:48px}}
+#sakulaboButton,#sakulaboBackdrop{display:none!important}
+</style></script></body></html>
