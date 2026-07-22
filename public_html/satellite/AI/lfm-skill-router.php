@@ -88,11 +88,18 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
             'description' => '今後のスケジュールを日付の近い順に検索',
         ));
     }
-    if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query)) {
+    if (preg_match('/さくみみ/u', $query)) {
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'sakumimi_latest',
+            'sources' => array('sakumimi_data.json'), 'sort' => 'latest', 'date_filter' => 'latest',
+            'description' => 'さくみみの配信情報を新しい順に検索',
+        ));
+    }
+    if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query) || ($domain && preg_match('/最新|最近|近況|動向/u', $query))) {
         return array_merge($plan, array(
             'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest',
-            'sources' => array('sakurazaka_news.json'), 'sort' => 'latest', 'date_filter' => 'latest',
-            'description' => '櫻坂46ニュースを新しい順に並べて検索',
+            'sources' => array('sakurazaka_news.json', 'blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest',
+            'description' => '櫻坂46の公式ニュースとメンバーブログをそれぞれ新しい順に検索',
         ));
     }
     if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) {
@@ -380,6 +387,28 @@ function api_skill_result(array $value, string $label): array
     );
 }
 
+function api_skill_context_text(array $value, string $label): string
+{
+    $parts = array();
+    $date = trim((string) ($value['date'] ?? $value['published_at'] ?? $value['start_date'] ?? ''));
+    $time = trim((string) ($value['time'] ?? ''));
+    $title = trim((string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? ''));
+    $author = trim((string) ($value['member'] ?? $value['author'] ?? ''));
+    $category = trim((string) ($value['category'] ?? ''));
+    $content = trim((string) ($value['content'] ?? $value['description'] ?? ''));
+    $members = is_array($value['members'] ?? null) ? implode('、', array_map('strval', $value['members'])) : '';
+    $episode = trim((string) ($value['episode'] ?? ''));
+    if ($date !== '') $parts[] = '日付=' . $date;
+    if ($time !== '') $parts[] = '時刻=' . $time;
+    if ($category !== '') $parts[] = '分類=' . $category;
+    if ($author !== '') $parts[] = 'メンバー=' . $author;
+    if ($members !== '') $parts[] = '出演=' . $members;
+    if ($episode !== '') $parts[] = '回=' . $episode;
+    if ($title !== '') $parts[] = '題名=' . lfm_substr($title, 0, 220);
+    if ($content !== '') $parts[] = '概要=' . lfm_substr(preg_replace('/\s+/u', ' ', $content) ?? $content, 0, 320);
+    return $label . ': ' . implode(' | ', $parts);
+}
+
 function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): array
 {
     $dataDir = dirname(__DIR__) . '/data';
@@ -391,11 +420,20 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
     $experts = api_skill_experts();
     $hits = array();
     foreach ($selected as $expertId) {
-        foreach ($experts[$expertId]['sources'] as $file => $label) {
+        $expertSources = $experts[$expertId]['sources'];
+        if (!empty($plan['sources'])) {
+            $orderedSources = array();
+            foreach ($plan['sources'] as $plannedFile) {
+                if (isset($expertSources[$plannedFile])) $orderedSources[$plannedFile] = $expertSources[$plannedFile];
+            }
+            $expertSources = $orderedSources;
+        }
+        foreach ($expertSources as $file => $label) {
             if (!empty($plan['sources']) && !in_array($file, $plan['sources'], true)) continue;
-            $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest'), true);
+            $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest', 'sakumimi_latest'), true);
+            $sourceLimit = count($plan['sources'] ?? array()) > 1 ? 3 : 10;
             $sourceHits = $temporal
-                ? api_skill_temporal_hits($dataDir . '/' . $file, $file, $label, $plan, 10)
+                ? api_skill_temporal_hits($dataDir . '/' . $file, $file, $label, $plan, $sourceLimit)
                 : api_skill_search_source($dataDir . '/' . $file, $query, 7);
             foreach ($sourceHits as $hit) {
                 $hit['label'] = $label;
@@ -411,16 +449,15 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
     $results = array();
     $used = 0;
     foreach ($hits as $hit) {
-        $piece = '[' . $hit['label'] . '] ' . lfm_substr($hit['text'], 0, 700);
+        $decoded = json_decode($hit['text'], true);
+        $value = is_array($decoded) && isset($decoded['value']) && is_array($decoded['value']) ? $decoded['value'] : $decoded;
+        if (!is_array($value)) continue;
+        $piece = api_skill_context_text($value, $hit['label']);
         if ($used + lfm_strlen($piece) > 3600) continue;
         $context[] = $piece;
         $used += lfm_strlen($piece);
-        $decoded = json_decode($hit['text'], true);
-        $value = is_array($decoded) && isset($decoded['value']) && is_array($decoded['value']) ? $decoded['value'] : $decoded;
-        if (is_array($value)) {
-            $result = api_skill_result($value, $hit['label']);
-            if ($result['url'] !== '' || $result['image'] !== '') $results[] = $result;
-        }
+        $result = api_skill_result($value, $hit['label']);
+        if ($result['url'] !== '' || $result['image'] !== '') $results[] = $result;
         if (count($context) >= 6) break;
     }
     return array(

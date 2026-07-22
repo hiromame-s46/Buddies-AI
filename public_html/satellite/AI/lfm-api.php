@@ -191,7 +191,15 @@ if (is_file($skillRouterFile)) {
         }));
         $hits = array();
         foreach (array_slice($selected, 0, 2) as $id) {
-            foreach ($experts[$id]['sources'] as $file => $label) {
+            $expertSources = $experts[$id]['sources'];
+            if (!empty($plan['sources'])) {
+                $orderedSources = array();
+                foreach ($plan['sources'] as $plannedFile) {
+                    if (isset($expertSources[$plannedFile])) $orderedSources[$plannedFile] = $expertSources[$plannedFile];
+                }
+                $expertSources = $orderedSources;
+            }
+            foreach ($expertSources as $file => $label) {
                 if (!empty($plan['sources']) && !in_array($file, $plan['sources'], true)) continue;
                 $items = json_decode((string) @file_get_contents($dataDir . '/' . $file), true);
                 if (!is_array($items)) continue;
@@ -206,6 +214,8 @@ if (is_file($skillRouterFile)) {
                     usort($items, static fn(array $a, array $b): int => strcmp((string) ($a['date'] ?? '') . (string) ($a['time'] ?? ''), (string) ($b['date'] ?? '') . (string) ($b['time'] ?? '')));
                 } elseif ($file === 'blogs.json' && ($plan['sort'] ?? '') === 'latest') {
                     usort($items, static fn(array $a, array $b): int => strtotime(str_replace('/', '-', (string) ($b['date'] ?? ''))) <=> strtotime(str_replace('/', '-', (string) ($a['date'] ?? ''))));
+                } elseif ($file === 'sakumimi_data.json' && ($plan['sort'] ?? '') === 'latest') {
+                    usort($items, static fn(array $a, array $b): int => strtotime(str_replace('.', '-', (string) ($b['date'] ?? ''))) <=> strtotime(str_replace('.', '-', (string) ($a['date'] ?? ''))));
                 } elseif ($file === 'sakurazaka_news.json' && ($plan['sort'] ?? '') === 'latest') {
                     usort($items, static function (array $a, array $b): int {
                         preg_match('/detail\/[A-Z]?(\d+)/i', (string) ($a['link'] ?? ''), $am);
@@ -213,14 +223,19 @@ if (is_file($skillRouterFile)) {
                         return ((int) ($bm[1] ?? 0)) <=> ((int) ($am[1] ?? 0));
                     });
                 }
+                $sourceAdded = 0;
+                $sourceLimit = count($plan['sources'] ?? array()) > 1 ? 3 : 10;
                 foreach ($items as $key => $item) {
                     $value = is_array($item) ? $item : array('value' => $item);
                     $text = (string) json_encode(array('key' => $key, 'value' => $value), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
                     $normalized = mb_strtolower($text, 'UTF-8');
                     $score = 0;
                     foreach ($terms as $term) $score += substr_count($normalized, $term);
-                    if ($score > 0 || ($plan['sort'] ?? '') !== 'relevance') $hits[] = array('score' => $score, 'label' => $label, 'text' => $text, 'value' => $value);
-                    if (($plan['sort'] ?? '') !== 'relevance' && count($hits) >= 10) break;
+                    if ($score > 0 || ($plan['sort'] ?? '') !== 'relevance') {
+                        $hits[] = array('score' => $score, 'label' => $label, 'text' => $text, 'value' => $value);
+                        $sourceAdded++;
+                    }
+                    if (($plan['sort'] ?? '') !== 'relevance' && $sourceAdded >= $sourceLimit) break;
                 }
             }
         }
@@ -229,11 +244,17 @@ if (is_file($skillRouterFile)) {
         $results = array();
         $used = 0;
         foreach ($hits as $hit) {
-            $piece = '[' . $hit['label'] . '] ' . lfm_substr($hit['text'], 0, 700);
-            if ($used + lfm_strlen($piece) > 2400) continue;
+            $value = $hit['value'];
+            $fields = array();
+            foreach (array('date' => '日付', 'time' => '時刻', 'category' => '分類', 'member' => 'メンバー', 'title' => '題名', 'name' => '名前', 'content' => '概要') as $field => $fieldLabel) {
+                $fieldValue = trim((string) ($value[$field] ?? ''));
+                if ($fieldValue !== '') $fields[] = $fieldLabel . '=' . lfm_substr(preg_replace('/\s+/u', ' ', $fieldValue) ?? $fieldValue, 0, $field === 'content' ? 320 : 220);
+            }
+            if (is_array($value['members'] ?? null) && $value['members']) $fields[] = '出演=' . implode('、', array_map('strval', $value['members']));
+            $piece = $hit['label'] . ': ' . implode(' | ', $fields);
+            if ($used + lfm_strlen($piece) > 3600) continue;
             $context[] = $piece;
             $used += lfm_strlen($piece);
-            $value = $hit['value'];
             $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? ($value['links'][0] ?? ''));
             $image = (string) ($value['thumb'] ?? $value['image'] ?? $value['image_url'] ?? '');
             if ($image === '' && isset($value['images'][0])) $image = (string) $value['images'][0];
@@ -244,7 +265,7 @@ if (is_file($skillRouterFile)) {
                     'date' => (string) ($value['date'] ?? $value['published_at'] ?? ''),
                 );
             }
-            if (count($context) >= 4) break;
+            if (count($context) >= 6) break;
         }
         $contextText = $context
             ? "検索計画: " . ($plan['description'] ?? '') . "\n検索結果（指定済みの順序）:\n" . implode("\n", $context)
@@ -261,7 +282,8 @@ if (!function_exists('api_skill_plan')) {
         if (preg_match('/今日(?:の)?(?:予定|スケジュール|出演)|本日(?:の)?(?:予定|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_today', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'today', 'description' => '今日のスケジュールを日付で絞り込み'));
         if (preg_match('/明日(?:の)?(?:予定|スケジュール|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_tomorrow', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'tomorrow', 'description' => '明日のスケジュールを日付で絞り込み'));
         if (preg_match('/予定|スケジュール|出演情報/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_upcoming', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'upcoming', 'description' => '今後のスケジュールを日付の近い順に検索'));
-        if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest', 'sources' => array('sakurazaka_news.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'ニュースを新しい順に並べて検索'));
+        if (preg_match('/さくみみ/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'sakumimi_latest', 'sources' => array('sakumimi_data.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'さくみみの配信情報を新しい順に検索'));
+        if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)|櫻坂.*(?:最新|最近|近況|動向)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest', 'sources' => array('sakurazaka_news.json', 'blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => '公式ニュースとメンバーブログをそれぞれ新しい順に検索'));
         if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest', 'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'ブログを投稿日が新しい順に並べて検索'));
         if (preg_match('/櫻坂|欅坂|Buddies|BACKS|メンバー|楽曲|センター|ライブ|MV|誕生日|プロフィール/u', $query) && preg_match('/誰|何|いつ|どこ|教えて|調べ|検索|とは|\?/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-dictionary'), 'intent' => 'knowledge_search', 'description' => '関連する櫻坂46データを絞り込んで検索'));
         return $base;
