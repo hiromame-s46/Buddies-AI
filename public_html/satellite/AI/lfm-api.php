@@ -182,7 +182,7 @@ function api_sakurazaka_skill(string $query): array
     // Never search the knowledge base for ordinary conversation. A query must
     // explicitly mention Sakurazaka-related subjects before any files are read.
     if (!$sakurazaka) {
-        return array('skills' => array(), 'context' => '');
+        return array('skills' => array(), 'context' => '', 'results' => array());
     }
 
     static $cache = array();
@@ -213,11 +213,26 @@ function api_sakurazaka_skill(string $query): array
         }
     }
     usort($hits, static function (array $a, array $b): int { return $b['score'] <=> $a['score']; });
-    $context = array(); $used = 0; $skillSet = array();
+    $context = array(); $results = array(); $used = 0; $skillSet = array();
     foreach ($hits as $hit) {
         $piece = '[' . $hit['label'] . ' / ' . $hit['file'] . '] ' . lfm_substr($hit['text'], 0, 700);
         if ($used + lfm_strlen($piece) > 2200) continue;
         $context[] = $piece; $used += lfm_strlen($piece);
+        $decodedHit = json_decode($hit['text'], true);
+        $value = is_array($decodedHit) && isset($decodedHit['value']) && is_array($decodedHit['value']) ? $decodedHit['value'] : $decodedHit;
+        if (is_array($value)) {
+            $url = (string) ($value['link'] ?? $value['url'] ?? $value['official_url'] ?? '');
+            $image = (string) ($value['thumb'] ?? $value['image'] ?? $value['image_url'] ?? '');
+            if ($image === '' && isset($value['images'][0])) $image = (string) $value['images'][0];
+            $results[] = array(
+                'type' => $hit['label'],
+                'title' => (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? $hit['label']),
+                'url' => $url,
+                'image' => $image,
+                'author' => (string) ($value['member'] ?? $value['author'] ?? ''),
+                'date' => (string) ($value['date'] ?? $value['published_at'] ?? ''),
+            );
+        }
         if (in_array($hit['label'], array('メンバー', '卒業メンバー'), true)) $skillSet['sakurazaka-members'] = true;
         if (in_array($hit['label'], array('楽曲', 'MV', 'ペンライトカラー'), true)) $skillSet['sakurazaka-music'] = true;
         if (in_array($hit['label'], array('ライブ', 'セットリスト', 'フォーメーション', '櫻坂のさ', 'さくみみ', 'ブログ', 'ニュース', 'スケジュール'), true)) $skillSet['sakurazaka-archive'] = true;
@@ -225,7 +240,7 @@ function api_sakurazaka_skill(string $query): array
     }
     $skills = array_keys($planned ?: $skillSet);
     if ($context && !$skills) $skills = array('sakurazaka-knowledge');
-    return array('skills' => $skills, 'context' => $context ? "\n\n【スキル参照情報】\n" . implode("\n", $context) : '');
+    return array('skills' => $skills, 'context' => $context ? "\n\n【スキル参照情報】\n" . implode("\n", $context) : '', 'results' => array_slice($results, 0, 4));
 }
 
 function api_build_prompt(array $input, int $maxChars): array
@@ -262,9 +277,12 @@ function api_build_prompt(array $input, int $maxChars): array
         api_error('prompt must be shorter', 422, array('max_chars' => $maxChars));
     }
     $system = lfm_substr($system, 0, 1200);
-    $skill = api_sakurazaka_skill($prompt);
+    $useSkills = lfm_bool($input['use_skills'] ?? false, false);
+    $skill = $useSkills
+        ? api_sakurazaka_skill($prompt)
+        : array('skills' => array(), 'context' => '', 'results' => array());
     if ($skill['context'] !== '') $prompt = $skill['context'] . "\n\n【ユーザーの質問】\n" . $prompt;
-    return array($system, $prompt, $skill['skills']);
+    return array($system, $prompt, $skill['skills'], $skill['results']);
 }
 
 function api_clean_output(string $text, string $prompt = ''): string
@@ -380,7 +398,7 @@ if (!is_array($input)) {
 
 $maxPromptChars = lfm_int($env['LFM_MAX_PROMPT_CHARS'] ?? 20000, 20000, 256, 20000);
 $GLOBALS['LFM_REQUEST_SYSTEM_PROMPT'] = (string) ($env['LFM_SYSTEM_PROMPT'] ?? lfm_default_env()['LFM_SYSTEM_PROMPT']);
-list($systemPrompt, $prompt, $skills) = api_build_prompt($input, $maxPromptChars);
+list($systemPrompt, $prompt, $skills, $skillResults) = api_build_prompt($input, $maxPromptChars);
 $maxAllowedTokens = lfm_int($env['LFM_MAX_OUTPUT_TOKENS'] ?? 256, 256, 16, 1024);
 $maxTokens = lfm_int($input['max_tokens'] ?? min(1024, $maxAllowedTokens), min(1024, $maxAllowedTokens), 16, $maxAllowedTokens);
 $temperature = lfm_float($input['temperature'] ?? 0.2, 0.2, 0.0, 1.5);
@@ -472,6 +490,7 @@ lfm_json_response(array(
     'ok' => true,
     'text' => $text,
     'skills' => $skills,
+    'results' => $skillResults,
     'model' => LFM_MODEL_REPO . ':Q4_K_M',
     'usage' => array('max_output_tokens' => $maxTokens),
     'elapsed_seconds' => $elapsed,
