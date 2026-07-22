@@ -88,11 +88,19 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
             'description' => 'さくみみの配信情報を新しい順に検索',
         ));
     }
-    if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)/u', $query) || ($domain && !preg_match('/ブログ/u', $query) && preg_match('/最新|最近|近況|動向/u', $query))) {
+    if (preg_match('/最近(?:の)?活動|最近どう|近況|活動状況|最近(?:の)?動向/u', $query) || ($domain && preg_match('/最近|近況|動向/u', $query) && !preg_match('/ニュース|ブログ|さくみみ|予定|スケジュール/u', $query))) {
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-media', 'sakurazaka-members'), 'intent' => 'activity_latest',
+            'sources' => array('sakurazaka_news.json', 'schedule.json', 'sakumimi_data.json', 'blogs.json', 'member.json'),
+            'sort' => 'source_recent', 'date_filter' => 'mixed_recent', 'limit' => 5,
+            'description' => 'ニュース・スケジュール・さくみみ・ブログ・メンバーを個別に検索し、回答に必要な候補を選択',
+        ));
+    }
+    if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報)/u', $query)) {
         return array_merge($plan, array(
             'requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest',
-            'sources' => array('sakurazaka_news.json', 'blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest',
-            'description' => '櫻坂46の公式ニュースとメンバーブログをそれぞれ新しい順に検索',
+            'sources' => array('sakurazaka_news.json'), 'sort' => 'latest', 'date_filter' => 'latest',
+            'description' => '櫻坂46ニュースだけを新しい順に検索',
         ));
     }
     if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) {
@@ -155,6 +163,14 @@ function api_skill_plan(string $query, ?string $dataDir = null): array
             'requires_skill' => true, 'skills' => array('sakurazaka-members'), 'intent' => 'member_profile',
             'sources' => array('member.json', 'member_grad.json'), 'sort' => 'exact', 'date_filter' => '', 'limit' => 1,
             'description' => $memberTarget . 'のメンバー情報だけを完全一致で検索',
+        ));
+    }
+    if (preg_match('/メンバー|プロフィール|誰/u', $query)) {
+        $plan['filters']['text_query'] = $query;
+        return array_merge($plan, array(
+            'requires_skill' => true, 'skills' => array('sakurazaka-members'), 'intent' => 'member_search',
+            'sources' => array('member.json', 'member_grad.json'), 'sort' => 'relevance', 'limit' => 4,
+            'description' => 'メンバー情報だけを条件一致で検索',
         ));
     }
 
@@ -421,7 +437,7 @@ function api_skill_search_source(string $path, string $query, int $limit = 8): a
 
 function api_skill_item_sort_key(array $value, string $file): int
 {
-    foreach (array('date', 'published_at', 'start_date', 'datetime', 'releasedate') as $field) {
+    foreach (array('date', 'published_at', 'start_date', 'datetime', 'releasedate', 'updated_at') as $field) {
         $raw = trim((string) ($value[$field] ?? ''));
         if ($raw === '') continue;
         $timestamp = strtotime(str_replace('/', '-', $raw));
@@ -451,6 +467,8 @@ function api_skill_temporal_hits(string $path, string $file, string $label, arra
             if ($date !== $targetDate) continue;
         } elseif ($plan['date_filter'] === 'upcoming') {
             if ($date === '' || $date < $today->format('Y-m-d')) continue;
+        } elseif ($plan['date_filter'] === 'mixed_recent' && $file === 'schedule.json') {
+            if ($date === '' || $date < $today->format('Y-m-d')) continue;
         }
         $sortKey = api_skill_item_sort_key($item, $file);
         $time = preg_replace('/\D+/', '', (string) ($item['time'] ?? '')) ?? '';
@@ -461,7 +479,7 @@ function api_skill_temporal_hits(string $path, string $file, string $label, arra
         $text = (string) json_encode(array('key' => $key, 'value' => $item), JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $hits[] = array('score' => 100, 'sort_key' => $sortKey, 'label' => $label, 'file' => $file, 'text' => $text);
     }
-    $ascending = ($plan['sort'] ?? '') === 'date_asc';
+    $ascending = ($plan['sort'] ?? '') === 'date_asc' || (($plan['sort'] ?? '') === 'source_recent' && $file === 'schedule.json');
     usort($hits, static function (array $a, array $b) use ($ascending): int {
         return $ascending ? ($a['sort_key'] <=> $b['sort_key']) : ($b['sort_key'] <=> $a['sort_key']);
     });
@@ -601,8 +619,9 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
         }
         foreach ($expertSources as $file => $label) {
             if (!empty($plan['sources']) && !in_array($file, $plan['sources'], true)) continue;
-            $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest', 'sakumimi_latest'), true);
-            $sourceLimit = count($plan['sources'] ?? array()) > 1 ? 3 : 10;
+            $temporal = in_array($plan['intent'], array('schedule_today', 'schedule_tomorrow', 'schedule_upcoming', 'news_latest', 'blog_latest', 'sakumimi_latest', 'activity_latest'), true);
+            $sourceCount = count($plan['sources'] ?? array());
+            $sourceLimit = $sourceCount > 2 ? 1 : ($sourceCount > 1 ? 3 : 10);
             $hasExactFilter = trim((string) (($plan['filters']['member_name'] ?? ''))) !== '' || trim((string) (($plan['filters']['item_title'] ?? ''))) !== '';
             $sourceHits = $temporal
                 ? api_skill_temporal_hits($dataDir . '/' . $file, $file, $label, $plan, $sourceLimit)
@@ -630,12 +649,16 @@ function api_sakurazaka_skill(string $query, ?array $requestedPlan = null): arra
         $fingerprint = mb_strtolower(preg_replace('/[\s　]+/u', '', (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? $hit['text'])) ?? '', 'UTF-8');
         if ($fingerprint !== '' && isset($seen[$fingerprint])) continue;
         if ($fingerprint !== '') $seen[$fingerprint] = true;
-        $piece = api_skill_context_text($value, $hit['label']);
+        $resultId = 'R' . (count($context) + 1);
+        $piece = '[' . $resultId . '] ' . api_skill_context_text($value, $hit['label']);
         if ($used + lfm_strlen($piece) > 3600) continue;
         $context[] = $piece;
         $used += lfm_strlen($piece);
         $result = api_skill_result($value, $hit['label']);
-        if ($result['url'] !== '' || $result['image'] !== '') $results[] = $result;
+        if ($result['url'] !== '' || $result['image'] !== '') {
+            $result['_id'] = $resultId;
+            $results[] = $result;
+        }
         if (count($context) >= min(6, max(1, (int) ($plan['limit'] ?? 6)))) break;
     }
     return array(

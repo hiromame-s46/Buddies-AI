@@ -209,14 +209,14 @@ if (is_file($skillRouterFile)) {
                     $items = array_values(array_filter($items, static function ($item) use ($plan, $target): bool {
                         if (!is_array($item)) return false;
                         $date = str_replace('/', '-', (string) ($item['date'] ?? ''));
-                        return $plan['date_filter'] === 'upcoming' ? $date >= $target : $date === $target;
+                        return in_array($plan['date_filter'], array('upcoming', 'mixed_recent'), true) ? $date >= $target : $date === $target;
                     }));
                     usort($items, static fn(array $a, array $b): int => strcmp((string) ($a['date'] ?? '') . (string) ($a['time'] ?? ''), (string) ($b['date'] ?? '') . (string) ($b['time'] ?? '')));
-                } elseif ($file === 'blogs.json' && ($plan['sort'] ?? '') === 'latest') {
+                } elseif ($file === 'blogs.json' && in_array(($plan['sort'] ?? ''), array('latest', 'source_recent'), true)) {
                     usort($items, static fn(array $a, array $b): int => strtotime(str_replace('/', '-', (string) ($b['date'] ?? ''))) <=> strtotime(str_replace('/', '-', (string) ($a['date'] ?? ''))));
-                } elseif ($file === 'sakumimi_data.json' && ($plan['sort'] ?? '') === 'latest') {
+                } elseif ($file === 'sakumimi_data.json' && in_array(($plan['sort'] ?? ''), array('latest', 'source_recent'), true)) {
                     usort($items, static fn(array $a, array $b): int => strtotime(str_replace('.', '-', (string) ($b['date'] ?? ''))) <=> strtotime(str_replace('.', '-', (string) ($a['date'] ?? ''))));
-                } elseif ($file === 'sakurazaka_news.json' && ($plan['sort'] ?? '') === 'latest') {
+                } elseif ($file === 'sakurazaka_news.json' && in_array(($plan['sort'] ?? ''), array('latest', 'source_recent'), true)) {
                     usort($items, static function (array $a, array $b): int {
                         preg_match('/detail\/[A-Z]?(\d+)/i', (string) ($a['link'] ?? ''), $am);
                         preg_match('/detail\/[A-Z]?(\d+)/i', (string) ($b['link'] ?? ''), $bm);
@@ -224,7 +224,8 @@ if (is_file($skillRouterFile)) {
                     });
                 }
                 $sourceAdded = 0;
-                $sourceLimit = count($plan['sources'] ?? array()) > 1 ? 3 : 10;
+                $sourceCount = count($plan['sources'] ?? array());
+                $sourceLimit = $sourceCount > 2 ? 1 : ($sourceCount > 1 ? 3 : 10);
                 foreach ($items as $key => $item) {
                     $value = is_array($item) ? $item : array('value' => $item);
                     if (!api_fallback_value_matches_member($value, (string) (($plan['filters']['member_name'] ?? '')), $file)) continue;
@@ -258,7 +259,8 @@ if (is_file($skillRouterFile)) {
                     if ($profileValue !== '') $fields[] = trim((string) $profileKey) . '=' . lfm_substr($profileValue, 0, 120);
                 }
             }
-            $piece = $hit['label'] . ': ' . implode(' | ', $fields);
+            $resultId = 'R' . (count($context) + 1);
+            $piece = '[' . $resultId . '] ' . $hit['label'] . ': ' . implode(' | ', $fields);
             if ($used + lfm_strlen($piece) > 3600) continue;
             $context[] = $piece;
             $used += lfm_strlen($piece);
@@ -267,6 +269,7 @@ if (is_file($skillRouterFile)) {
             if ($image === '' && isset($value['images'][0])) $image = (string) $value['images'][0];
             if ($url !== '' || $image !== '') {
                 $results[] = array(
+                    '_id' => $resultId,
                     'type' => $hit['label'], 'title' => (string) ($value['title'] ?? $value['name'] ?? $value['song'] ?? $hit['label']),
                     'url' => $url, 'image' => $image, 'author' => (string) ($value['member'] ?? $value['author'] ?? ''),
                     'date' => (string) ($value['date'] ?? $value['published_at'] ?? ''),
@@ -324,9 +327,11 @@ if (!function_exists('api_skill_plan')) {
         if (preg_match('/明日(?:の)?(?:予定|スケジュール|出演)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_tomorrow', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'tomorrow', 'description' => '明日のスケジュールを日付で絞り込み'));
         if (preg_match('/予定|スケジュール|出演情報/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'schedule_upcoming', 'sources' => array('schedule.json'), 'sort' => 'date_asc', 'date_filter' => 'upcoming', 'description' => '今後のスケジュールを日付の近い順に検索'));
         if (preg_match('/さくみみ/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'sakumimi_latest', 'sources' => array('sakumimi_data.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'さくみみの配信情報を新しい順に検索'));
-        if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報|記事)|櫻坂.*(?:最新|最近|近況|動向)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest', 'sources' => array('sakurazaka_news.json', 'blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => '公式ニュースとメンバーブログをそれぞれ新しい順に検索'));
+        if (preg_match('/最近(?:の)?活動|最近どう|近況|活動状況|最近(?:の)?動向/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media', 'sakurazaka-members'), 'intent' => 'activity_latest', 'sources' => array('sakurazaka_news.json', 'schedule.json', 'sakumimi_data.json', 'blogs.json', 'member.json'), 'sort' => 'source_recent', 'date_filter' => 'mixed_recent', 'limit' => 5, 'description' => 'ニュース・スケジュール・さくみみ・ブログ・メンバーを個別に検索し、回答に必要な候補を選択'));
+        if (preg_match('/ニュース|最新情報|最近(?:の)?(?:話題|情報)/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'news_latest', 'sources' => array('sakurazaka_news.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => 'ニュースだけを新しい順に検索'));
         if (preg_match('/ブログ|最近(?:の)?記事/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-media'), 'intent' => 'blog_latest', 'sources' => array('blogs.json'), 'sort' => 'latest', 'date_filter' => 'latest', 'description' => ($memberTarget !== '' ? $memberTarget . 'の' : '') . 'ブログを投稿日が新しい順に並べて検索'));
         if ($memberTarget !== '') return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-members'), 'intent' => 'member_profile', 'sources' => array('member.json', 'member_grad.json'), 'sort' => 'exact', 'limit' => 1, 'description' => $memberTarget . 'のメンバー情報だけを完全一致で検索'));
+        if (preg_match('/メンバー|プロフィール|誰/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-members'), 'intent' => 'member_search', 'sources' => array('member.json', 'member_grad.json'), 'sort' => 'relevance', 'limit' => 4, 'description' => 'メンバー情報だけを条件一致で検索'));
         if (preg_match('/櫻坂|欅坂|Buddies|BACKS|メンバー|楽曲|センター|ライブ|MV|誕生日|プロフィール/u', $query) && preg_match('/誰|何|いつ|どこ|教えて|調べ|検索|とは|\?/u', $query)) return array_merge($base, array('requires_skill' => true, 'skills' => array('sakurazaka-dictionary'), 'intent' => 'knowledge_search', 'description' => '関連する櫻坂46データを絞り込んで検索'));
         return $base;
     }
@@ -372,7 +377,8 @@ function api_build_prompt(array $input, int $maxChars): array
         ? api_sakurazaka_skill($currentQuery, $requestedPlan)
         : array('skills' => array(), 'context' => '', 'results' => array());
     if ($useSkills) {
-        $system .= "\nスキルは検索専用です。PHPで抽出済みの検索結果だけを自然な回答へ整形し、検索結果にない人物・日付・出来事を追加しないでください。";
+        $system .= "\nスキルは検索専用です。PHPで抽出済みの検索結果だけを自然な回答へ整形し、検索結果にない人物・日付・出来事を追加しないでください。"
+            . "\n回答に実際に採用した検索候補IDだけを<USE_RESULTS>R1,R2</USE_RESULTS>の形式で示し、その後に<FINAL>回答本文</FINAL>を出力してください。候補は1件でも複数でも構いません。";
     }
     $learningContext = api_learning_context($currentQuery);
     $sections = array();
@@ -403,6 +409,7 @@ function api_clean_output(string $text, string $prompt = ''): string
     }
     $text = preg_replace('/<(?:REFERENCE_HISTORY|INTERNAL_DICTIONARY|INTERNAL_SKILL_CONTEXT|CURRENT_USER_QUERY|OUTPUT_RULE)>.*?<\/(?:REFERENCE_HISTORY|INTERNAL_DICTIONARY|INTERNAL_SKILL_CONTEXT|CURRENT_USER_QUERY|OUTPUT_RULE)>/su', '', $text) ?? $text;
     $text = str_replace(array('<FINAL>', '</FINAL>'), '', $text);
+    $text = preg_replace('/<USE_RESULTS>.*?<\/USE_RESULTS>/su', '', $text) ?? $text;
     $lines = explode("\n", $text);
 
     // Fallback for builds that alter whitespace while echoing the prompt:
@@ -456,6 +463,14 @@ function api_clean_output(string $text, string $prompt = ''): string
     $text = trim(implode("\n", $clean));
     $text = preg_replace('/^(assistant|アシスタント)\s*[:：]\s*/iu', '', $text) ?? $text;
     return trim($text);
+}
+
+function api_selected_result_ids(string $text): array
+{
+    if (!preg_match_all('/<USE_RESULTS>\s*([^<]*)\s*<\/USE_RESULTS>/iu', $text, $matches) || empty($matches[1])) return array();
+    $last = (string) end($matches[1]);
+    preg_match_all('/\bR\d+\b/i', $last, $ids);
+    return array_values(array_unique(array_map('strtoupper', $ids[0] ?? array())));
 }
 
 $env = lfm_load_env(false);
@@ -608,16 +623,30 @@ if (!$result['ok']) {
     ));
 }
 
-$text = api_clean_output((string) $result['stdout'], $prompt);
+$rawOutput = (string) $result['stdout'];
+$selectionOutput = $rawOutput;
+$selectionPromptPosition = strrpos($selectionOutput, $prompt);
+if ($selectionPromptPosition !== false) $selectionOutput = substr($selectionOutput, $selectionPromptPosition + strlen($prompt));
+$selectedResultIds = api_selected_result_ids($selectionOutput);
+$text = api_clean_output($rawOutput, $prompt);
 if ($text === '') {
     $details = trim((string) $result['stderr']);
     api_error('empty generation result', 500, array('details' => lfm_substr($details, 0, 1600)));
+}
+$publicSkillResults = array();
+foreach ($skillResults as $skillResult) {
+    if (!is_array($skillResult)) continue;
+    $resultId = strtoupper((string) ($skillResult['_id'] ?? ''));
+    if (($searchPlan['intent'] ?? '') === 'activity_latest' && !$selectedResultIds) continue;
+    if ($selectedResultIds && !in_array($resultId, $selectedResultIds, true)) continue;
+    unset($skillResult['_id']);
+    $publicSkillResults[] = $skillResult;
 }
 lfm_json_response(array(
     'ok' => true,
     'text' => $text,
     'skills' => $skills,
-    'results' => $skillResults,
+    'results' => $publicSkillResults,
     'search_plan' => $searchPlan,
     'model' => LFM_MODEL_REPO . ':Q4_K_M',
     'usage' => array('max_output_tokens' => $maxTokens),
